@@ -680,6 +680,58 @@ mod tests {
 
         assert_eq!(quote.max_base_tokens(), 100);
         assert_eq!(quote.max_counter_tokens(), 1000);
+
+        // Test max tokens for a partial fill with no change and a minimum.
+        let sci = create_partial_sci_with_fee_payout(
+            &pair(),
+            100,
+            70,
+            0,
+            1000,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote =
+            Quote::new_with_fee_payout(sci, None, fee_account.view_private_key(), 100).unwrap();
+
+        assert_eq!(quote.max_base_tokens(), 100);
+        assert_eq!(quote.max_counter_tokens(), 1000);
+
+        // Test max tokens for a partial fill with change and no minimum.
+        let sci = create_partial_sci_with_fee_payout(
+            &pair(),
+            100,
+            0,
+            30,
+            1000,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote =
+            Quote::new_with_fee_payout(sci, None, fee_account.view_private_key(), 100).unwrap();
+
+        assert_eq!(quote.max_base_tokens(), 70);
+        assert_eq!(quote.max_counter_tokens(), 1000);
+
+        // Test max tokens for a partial fill with change and a minimum.
+        let sci = create_partial_sci_with_fee_payout(
+            &pair(),
+            100,
+            30,
+            60,
+            1000,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+
+        let quote =
+            Quote::new_with_fee_payout(sci, None, fee_account.view_private_key(), 100).unwrap();
+
+        assert_eq!(quote.max_base_tokens(), 40);
+        assert_eq!(quote.max_counter_tokens(), 1000);
     }
 
     #[test]
