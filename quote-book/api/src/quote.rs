@@ -1,6 +1,7 @@
 // Copyright (c) 2023 MobileCoin Inc.
 
 use crate::{Error, Pair, QuoteId};
+use mc_crypto_keys::RistrettoPrivate;
 use mc_transaction_extra::SignedContingentInput;
 use mc_transaction_types::TokenId;
 use serde::{Deserialize, Serialize};
@@ -98,8 +99,8 @@ impl Quote {
                 if num_required_outputs == 1 {
                     if sci.required_output_amounts[0].token_id != base_token_id {
                         return Err(Error::UnsupportedSci(format!(
-                        "Suspected required-change-output token id {} does not match partial output token id {}",
-                        sci.required_output_amounts[0].token_id, amount.token_id
+                        "Suspected required-change-output token id {} does not match base token id {}",
+                        sci.required_output_amounts[0].token_id, base_token_id,
                     )));
                     }
                     max_base_amount = max_base_amount
@@ -116,6 +117,218 @@ impl Quote {
                     amount.token_id,
                     min_base_amount..=max_base_amount,
                     amount.value,
+                )
+            }
+            _ => {
+                return Err(Error::UnsupportedSci(format!(
+                    "Unsupported number of required/partial outputs {}/{}",
+                    input_rules.required_outputs.len(),
+                    input_rules.partial_fill_outputs.len()
+                )))
+            }
+        };
+
+        let id = QuoteId::from(&sci);
+
+        let pair = Pair {
+            base_token_id,
+            counter_token_id,
+        };
+
+        Ok(Self {
+            sci,
+            id,
+            pair,
+            base_range,
+            max_counter_tokens,
+            timestamp,
+        })
+    }
+
+    // TODO
+    /// Create a new quote from SCI and timestamp.
+    ///
+    /// # Arguments
+    /// * `sci` - The SCI to add.
+    /// * `timestamp` - The timestamp of the block containing the SCI. If not
+    ///   provided, the system time is used.
+    #[allow(clippy::result_large_err)]
+    pub fn new_with_fee_payout(
+        sci: SignedContingentInput,
+        timestamp: Option<u64>,
+        fee_view_private_key: &RistrettoPrivate,
+        required_fee_basis_points: u16,
+    ) -> Result<Self, Error> {
+        let timestamp = if let Some(timestamp) = timestamp {
+            timestamp
+        } else {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| Error::Time)?
+                .as_nanos()
+                .try_into()
+                .map_err(|_| Error::Time)?
+        };
+
+        sci.validate()?;
+
+        // The base token being offered in exchange for some other token that the
+        // fulfiller will provide.
+        let base_token_id = TokenId::from(sci.pseudo_output_amount.token_id);
+
+        // TODO: This is making strong assumptions about the structure of the SCI and
+        // doesn't currently take into account the scenario where we would also
+        // want a fee output to pay the DEQS.
+        let input_rules = if let Some(input_rules) = sci.tx_in.input_rules.as_ref() {
+            input_rules
+        } else {
+            return Err(Error::UnsupportedSci("Missing input rules".into()));
+        };
+
+        let (counter_token_id, base_range, max_counter_tokens) = match (
+            input_rules.required_outputs.len(),
+            input_rules.partial_fill_outputs.len(),
+        ) {
+            (0, 0) => return Err(Error::UnsupportedSci("No required/partial outputs".into())),
+            (1, 0) => {
+                return Err(Error::UnsupportedSci(
+                    "Single required non-partial output not supported".into(),
+                ))
+            }
+            (2, 0) => {
+                // Two required non-partial output.
+                if sci.required_output_amounts[0].token_id
+                    != sci.required_output_amounts[1].token_id
+                {
+                    return Err(Error::UnsupportedSci(
+                        "Both required non-partial outputs should be the same token id".into(),
+                    ));
+                }
+
+                // One should be the fee output and one should be the output that pays back the
+                // SCI creator
+                let (payback_index, fee_index) = if input_rules.required_outputs[0]
+                    .view_key_match(fee_view_private_key)
+                    .is_ok()
+                {
+                    (1, 0)
+                } else if input_rules.required_outputs[1]
+                    .view_key_match(fee_view_private_key)
+                    .is_ok()
+                {
+                    (0, 1)
+                } else {
+                    return Err(Error::UnsupportedSci(
+                        "Neither of the required outputs pays the fee address".into(),
+                    ));
+                };
+
+                // TODO do we want to round up?
+                let required_fee_amount = ((sci.required_output_amounts[payback_index].value
+                    as u128)
+                    * (required_fee_basis_points as u128)
+                    / 10000u128) as u64;
+                if required_fee_amount > sci.required_output_amounts[fee_index].value {
+                    return Err(Error::UnsupportedSci(format!(
+                        "Expected a required fee output of at least {required_fee_amount}, got {}",
+                        sci.required_output_amounts[fee_index].value
+                    )));
+                }
+
+                (
+                    TokenId::from(sci.required_output_amounts[payback_index].token_id),
+                    sci.pseudo_output_amount.value..=sci.pseudo_output_amount.value,
+                    sci.required_output_amounts[payback_index].value,
+                )
+            }
+
+            (num_required_outputs @ (0 | 1), 2) => {
+                // Two partial outputs or two partial outputs + suspected change output
+                // One of the partial outputs is to pay the provider of the SCI, the other is to
+                // pay the fee.
+                let (partial_amount0, _) = input_rules.partial_fill_outputs[0]
+                    .reveal_amount()
+                    .map_err(|err| {
+                        Error::UnsupportedSci(format!(
+                            "Failed revealing partial output #0 amount: {err}"
+                        ))
+                    })?;
+                let (partial_amount1, _) = input_rules.partial_fill_outputs[1]
+                    .reveal_amount()
+                    .map_err(|err| {
+                        Error::UnsupportedSci(format!(
+                            "Failed revealing partial output #1 amount: {err}"
+                        ))
+                    })?;
+
+                if partial_amount0.token_id != partial_amount1.token_id {
+                    return Err(Error::UnsupportedSci(
+                        "Both required partial outputs should be the same token id".into(),
+                    ));
+                }
+                let partial_amounts = [partial_amount0, partial_amount1];
+
+                let (payback_index, fee_index) = if input_rules.partial_fill_outputs[0]
+                    .tx_out
+                    .view_key_match(fee_view_private_key)
+                    .is_ok()
+                {
+                    (1, 0)
+                } else if input_rules.partial_fill_outputs[1]
+                    .tx_out
+                    .view_key_match(fee_view_private_key)
+                    .is_ok()
+                {
+                    (0, 1)
+                } else {
+                    return Err(Error::UnsupportedSci(
+                        "Neither of the partial fill outputs pays the fee address".into(),
+                    ));
+                };
+
+                let payback_amount = partial_amounts[payback_index];
+                let fee_amount = partial_amounts[fee_index];
+
+                // TODO do we want to round up?
+                let required_fee_amount = ((payback_amount.value as u128)
+                    * (required_fee_basis_points as u128)
+                    / 10000u128) as u64;
+                if required_fee_amount > fee_amount.value {
+                    return Err(Error::UnsupportedSci(format!(
+                        "Expected a required fee output of at least {required_fee_amount}, got {}",
+                        fee_amount.value
+                    )));
+                }
+
+                let min_base_amount = input_rules.min_partial_fill_value;
+                let mut max_base_amount = sci.pseudo_output_amount.value;
+
+                // If we have a required output in addition to our partial output, we would
+                // expect it to be a change output. We assume its change if it
+                // is in the same token id as the base token, since it takes
+                // away from the amount of base tokens available for consumption
+                // by the fulfiller.
+                if num_required_outputs == 1 {
+                    if sci.required_output_amounts[0].token_id != base_token_id {
+                        return Err(Error::UnsupportedSci(format!(
+                        "Suspected required-change-output token id {} does not match base token id {}",
+                        sci.required_output_amounts[0].token_id, base_token_id,
+                    )));
+                    }
+                    max_base_amount = max_base_amount
+                        .checked_sub(sci.required_output_amounts[0].value)
+                        .ok_or_else(|| {
+                            Error::UnsupportedSci(format!(
+                                "max base amount {} is lower than required change {}",
+                                max_base_amount, sci.required_output_amounts[0].value
+                            ))
+                        })?;
+                }
+
+                (
+                    payback_amount.token_id,
+                    min_base_amount..=max_base_amount,
+                    payback_amount.value,
                 )
             }
             _ => {
@@ -325,6 +538,7 @@ impl PartialOrd for Quote {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mc_transaction_core::{AccountKey, PublicAddress};
     use rand::{prelude::SliceRandom, rngs::StdRng, SeedableRng};
     use rand_core::{CryptoRng, RngCore};
 
@@ -355,6 +569,30 @@ mod tests {
         )
     }
 
+    /// Create an SCI that offers some amount of a given token in exchange for a
+    /// different amount of another token. It also requires that the consumer
+    /// of the SCI pays a fee to a specific fee address.
+    /// Returning the builder allows the caller to customize the SCI further.
+    pub fn create_sci_with_fee_payout(
+        pair: &Pair,
+        base_amount: u64,
+        counter_amount: u64,
+        fee_address: &PublicAddress,
+        fee_basis_points: u16,
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> SignedContingentInput {
+        deqs_mc_test_utils::create_sci_with_fee_payout(
+            pair.base_token_id,
+            pair.counter_token_id,
+            base_amount,
+            counter_amount,
+            fee_address,
+            fee_basis_points,
+            rng,
+            None,
+        )
+    }
+
     /// Create a partial fill SCI that offers between
     /// required_base_change_amount and base_amount_offered tokens, with a
     /// minimum required fill of min_base_fill_amount.
@@ -376,6 +614,72 @@ mod tests {
             rng,
             None,
         )
+    }
+
+    /// Create a partial fill SCI that offers between
+    /// required_base_change_amount and base_amount_offered tokens, with a
+    /// minimum required fill of min_base_fill_amount.
+    /// It also requires that the SCI pays a proportional fee to a fee address.
+    pub fn create_partial_sci_with_fee_payout(
+        pair: &Pair,
+        base_amount_offered: u64,
+        min_base_fill_amount: u64,
+        required_base_change_amount: u64,
+        counter_amount: u64,
+        fee_address: &PublicAddress,
+        fee_basis_points: u16,
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> SignedContingentInput {
+        deqs_mc_test_utils::create_partial_sci_with_fee_payout(
+            pair.base_token_id,
+            pair.counter_token_id,
+            base_amount_offered,
+            min_base_fill_amount,
+            required_base_change_amount,
+            counter_amount,
+            fee_address,
+            fee_basis_points,
+            rng,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_max_tokens_with_fee() {
+        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
+
+        // Test max tokens for the non-partial-fill scenario
+        let sci = create_sci_with_fee_payout(
+            &pair(),
+            100,
+            200,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote =
+            Quote::new_with_fee_payout(sci, None, fee_account.view_private_key(), 100).unwrap();
+
+        assert_eq!(quote.max_base_tokens(), 100);
+        assert_eq!(quote.max_counter_tokens(), 200);
+
+        // Test max tokens for a partial fill with no change and no minimum.
+        let sci = create_partial_sci_with_fee_payout(
+            &pair(),
+            100,
+            0,
+            0,
+            1000,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote =
+            Quote::new_with_fee_payout(sci, None, fee_account.view_private_key(), 100).unwrap();
+
+        assert_eq!(quote.max_base_tokens(), 100);
+        assert_eq!(quote.max_counter_tokens(), 1000);
     }
 
     #[test]

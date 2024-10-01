@@ -1326,6 +1326,7 @@ dependencies = [
  "hex",
  "mc-blockchain-types",
  "mc-crypto-digestible",
+ "mc-crypto-keys",
  "mc-crypto-ring-signature",
  "mc-transaction-core",
  "mc-transaction-extra",
