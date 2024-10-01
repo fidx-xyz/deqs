@@ -743,7 +743,7 @@ impl LiquidityBotTask {
             block_version,
             input_credentials,
             fog_resolver,
-            EmptyMemoBuilder::default(), // TODO
+            EmptyMemoBuilder, // TODO
         )?;
         builder.add_partial_fill_output(
             Amount::new(counter_amount, *counter_token_id),

@@ -1,15 +1,22 @@
+[graph]
 targets = []
 
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-vulnerability = "deny"
-unmaintained = "warn"
 yanked = "warn"
-notice = "warn"
 ignore = [
     "RUSTSEC-2021-0145", # some Windows-only vuln by the `atty` crate brought in via `clap`.
-    "RUSTSEC-2020-0071", # `time` crate brought in by `chrono` has a vuln, see https://github.com/chronotope/chrono/issues/602#issuecomment-1075915577 on why there's currently no solution for that
+    "RUSTSEC-2021-0139", # unmaintain ansi_term
+    "RUSTSEC-2024-0375", # unmaintained atty
+    "RUSTSEC-2024-0344", # curve25519-dalek 3.2.0 timing vuln, libp2p depends on it and is stuck on this version with the rust compiler mobilecoin uses
+    "RUSTSEC-2024-0344", # curve25519-dalek 4.1.1 timing vuln, need to update bulletproofs-of to address this
+    "RUSTSEC-2022-0093", # ed25519-dalek 1.0.1 serialization issue (libp2p dependency)
+    "RUSTSEC-2020-0036", # failure 0.1.8 unmaintained
+    "RUSTSEC-2019-0036", # failure 0.1.8 unsound issue
+    "RUSTSEC-2024-0370", # proc-macro-error 1.0.4  unmaintained
+    "RUSTSEC-2024-0336", # rustls potential infinite loop (libp2p dependency)
+    "RUSTSEC-2024-0365", # diesel injection if input >4gb, need newer rust compiler to update
 ]
 
 [licenses]
@@ -36,9 +43,6 @@ ignore = [
 #     { name = "ring", expression = "MIT AND ISC AND OpenSSL", license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }] },
 # ]
 
-unlicensed = "allow"
-copyleft = "allow"
-default = "allow"
 clarify = [
     { name = "ring", expression = "MIT AND ISC AND OpenSSL", license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }] },
 ]
