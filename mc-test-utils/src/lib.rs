@@ -59,7 +59,7 @@ pub fn create_sci_builder(
         block_version,
         offered_input_credentials,
         fog_resolver.clone(),
-        EmptyMemoBuilder::default(),
+        EmptyMemoBuilder,
     )
     .unwrap();
 
@@ -151,7 +151,7 @@ pub fn create_partial_sci(
         block_version,
         offered_input_credentials,
         fog_resolver.clone(),
-        EmptyMemoBuilder::default(),
+        EmptyMemoBuilder,
     )
     .unwrap();
 

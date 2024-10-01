@@ -81,7 +81,7 @@ impl<REQ: RpcRequest, RESP: RpcResponse> Behaviour<REQ, RESP> {
         let rpc = Self::create_rpc();
 
         Ok(Self {
-            keep_alive: keep_alive::Behaviour::default(),
+            keep_alive: keep_alive::Behaviour,
             ping: ping::Behaviour::default(),
             kademlia,
             gossipsub,

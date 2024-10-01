@@ -399,7 +399,7 @@ impl LiquidityBotTask {
 
                     log::info!(
                         self.logger,
-                        "TxOut {} was spent, and the partial fill output {} was included in block with amount {:?} ({}% filled). {:?} change returned", 
+                        "TxOut {} was spent, and the partial fill output {} was included in block with amount {:?} ({}% filled). {:?} change returned",
                         fulfilled_sci.listed_tx_out.matched_tx_out.tx_out.public_key,
                         fulfilled_sci.received_counter_output.tx_out.public_key,
                         fulfilled_sci.received_counter_output.amount,
@@ -743,7 +743,7 @@ impl LiquidityBotTask {
             block_version,
             input_credentials,
             fog_resolver,
-            EmptyMemoBuilder::default(), // TODO
+            EmptyMemoBuilder, // TODO
         )?;
         builder.add_partial_fill_output(
             Amount::new(counter_amount, *counter_token_id),

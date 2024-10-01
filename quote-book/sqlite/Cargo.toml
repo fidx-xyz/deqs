@@ -15,8 +15,8 @@ mc-transaction-extra = { path = "../../mobilecoin/transaction/extra" }
 mc-transaction-types = { path = "../../mobilecoin/transaction/types" }
 mc-util-serial = { path = "../../mobilecoin/util/serial" }
 
-diesel = { version = "2.0.0", features = ["sqlite", "r2d2"] }
-diesel_migrations = "2.0.0"
+diesel = { version = "2.1.4", features = ["sqlite", "r2d2"] }
+diesel_migrations = "2.1.0"
 libsqlite3-sys = { version = ">=0.17.2, <0.26.0", features = ["bundled"] }
 r2d2 = "0.8"
 
