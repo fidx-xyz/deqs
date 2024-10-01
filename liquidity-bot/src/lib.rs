@@ -399,7 +399,7 @@ impl LiquidityBotTask {
 
                     log::info!(
                         self.logger,
-                        "TxOut {} was spent, and the partial fill output {} was included in block with amount {:?} ({}% filled). {:?} change returned", 
+                        "TxOut {} was spent, and the partial fill output {} was included in block with amount {:?} ({}% filled). {:?} change returned",
                         fulfilled_sci.listed_tx_out.matched_tx_out.tx_out.public_key,
                         fulfilled_sci.received_counter_output.tx_out.public_key,
                         fulfilled_sci.received_counter_output.amount,

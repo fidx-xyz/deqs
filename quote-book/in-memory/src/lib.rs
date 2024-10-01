@@ -1,6 +1,6 @@
 // Copyright (c) 2023 MobileCoin Inc.
 
-#![feature(btree_drain_filter)]
+#![feature(btree_extract_if)]
 
 use deqs_quote_book_api::{Error as QuoteBookError, Pair, Quote, QuoteBook, QuoteId};
 use mc_blockchain_types::BlockIndex;
@@ -80,7 +80,7 @@ impl QuoteBook for InMemoryQuoteBook {
 
         for entries in scis.values_mut() {
             let mut removed_entries = entries
-                .drain_filter(|entry| entry.key_image() == *key_image)
+                .extract_if(|entry| entry.key_image() == *key_image)
                 .collect();
 
             all_removed_quotes.append(&mut removed_entries);
@@ -99,7 +99,7 @@ impl QuoteBook for InMemoryQuoteBook {
 
         for entries in scis.values_mut() {
             let mut removed_entries = entries
-                .drain_filter(|entry| {
+                .extract_if(|entry| {
                     if let Some(input_rules) = &entry.sci().tx_in.input_rules {
                         input_rules.max_tombstone_block != 0
                             && validate_tombstone(

@@ -1,7 +1,6 @@
 // Copyright (c) 2023 MobileCoin Inc.
 
 use diesel::{
-    backend,
     deserialize::{self, FromSql},
     serialize::{self, Output, ToSql},
     sqlite::Sqlite,
@@ -45,7 +44,9 @@ impl fmt::Display for VecU64 {
 }
 
 impl FromSql<diesel::sql_types::Binary, Sqlite> for VecU64 {
-    fn from_sql(bytes: backend::RawValue<'_, Sqlite>) -> deserialize::Result<Self> {
+    fn from_sql(
+        bytes: <Sqlite as diesel::backend::Backend>::RawValue<'_>,
+    ) -> deserialize::Result<Self> {
         let vec = <Vec<u8> as FromSql<diesel::sql_types::Binary, Sqlite>>::from_sql(bytes)?;
         if vec.len() != 8 {
             return Err("VecU64: Invalid array length".into());

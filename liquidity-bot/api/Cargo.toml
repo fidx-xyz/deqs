@@ -12,7 +12,7 @@ deqs-api = { path = "../../api" }
 mc-api = { path = "../../mobilecoin/api" }
 
 futures = "0.3"
-grpcio = "0.12.0"
+grpcio = "0.13.0"
 protobuf = "2.27.1"
 
 [build-dependencies]
