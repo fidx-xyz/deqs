@@ -100,11 +100,7 @@ pub fn create_sci(
     );
 
     builder
-        .add_required_output(
-            Amount::new(fee_amount as u64, counter_token_id),
-            fee_address,
-            rng,
-        )
+        .add_required_output(Amount::new(fee_amount, counter_token_id), fee_address, rng)
         .unwrap();
 
     let sci = builder.build(&NoKeysRingSigner {}, rng).unwrap();
@@ -226,11 +222,7 @@ pub fn create_partial_sci(
     );
 
     builder
-        .add_partial_fill_output(
-            Amount::new(fee_amount as u64, counter_token_id),
-            fee_address,
-            rng,
-        )
+        .add_partial_fill_output(Amount::new(fee_amount, counter_token_id), fee_address, rng)
         .unwrap();
 
     let sci = builder.build(&NoKeysRingSigner {}, rng).unwrap();
