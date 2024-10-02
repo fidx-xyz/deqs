@@ -1,5 +1,7 @@
 // Copyright (c) 2023 MobileCoin Inc.
 
+#![feature(assert_matches)]
+
 mod basic_types;
 mod error;
 mod quote;

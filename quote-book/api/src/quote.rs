@@ -201,6 +201,7 @@ impl Quote {
     /// * `sci` - The SCI to add.
     /// * `timestamp` - The timestamp of the block containing the SCI. If not
     ///   provided, the system time is used.
+    // TODO rename to percentage_fee or something like that
     #[allow(clippy::result_large_err)]
     pub fn new_with_fee_payout(
         sci: SignedContingentInput,
@@ -238,12 +239,6 @@ impl Quote {
             input_rules.required_outputs.len(),
             input_rules.partial_fill_outputs.len(),
         ) {
-            (0, 0) => return Err(Error::UnsupportedSci("No required/partial outputs".into())),
-            (1, 0) => {
-                return Err(Error::UnsupportedSci(
-                    "Single required non-partial output not supported".into(),
-                ))
-            }
             (2, 0) => {
                 // Two required non-partial output.
                 if sci.required_output_amounts[0].token_id
@@ -256,16 +251,16 @@ impl Quote {
 
                 // One should be the fee output and one should be the output that pays back the
                 // SCI creator
-                let (counter_index, fee_index) = if input_rules.required_outputs[0]
-                    .view_key_match(fee_view_private_key)
-                    .is_ok()
-                {
-                    (1, 0)
-                } else if input_rules.required_outputs[1]
+                let (fee_index, counter_index) = if input_rules.required_outputs[0]
                     .view_key_match(fee_view_private_key)
                     .is_ok()
                 {
                     (0, 1)
+                } else if input_rules.required_outputs[1]
+                    .view_key_match(fee_view_private_key)
+                    .is_ok()
+                {
+                    (1, 0)
                 } else {
                     return Err(Error::UnsupportedSci(
                         "Neither of the required outputs pays the fee address".into(),
@@ -319,18 +314,18 @@ impl Quote {
                 }
                 let partial_amounts = [partial_amount0, partial_amount1];
 
-                let (counter_index, fee_index) = if input_rules.partial_fill_outputs[0]
-                    .tx_out
-                    .view_key_match(fee_view_private_key)
-                    .is_ok()
-                {
-                    (1, 0)
-                } else if input_rules.partial_fill_outputs[1]
+                let (fee_index, counter_index) = if input_rules.partial_fill_outputs[0]
                     .tx_out
                     .view_key_match(fee_view_private_key)
                     .is_ok()
                 {
                     (0, 1)
+                } else if input_rules.partial_fill_outputs[1]
+                    .tx_out
+                    .view_key_match(fee_view_private_key)
+                    .is_ok()
+                {
+                    (1, 0)
                 } else {
                     return Err(Error::UnsupportedSci(
                         "Neither of the partial fill outputs pays the fee address".into(),
@@ -595,6 +590,7 @@ mod tests {
     use mc_transaction_core::{AccountKey, PublicAddress};
     use rand::{prelude::SliceRandom, rngs::StdRng, SeedableRng};
     use rand_core::{CryptoRng, RngCore};
+    use std::assert_matches::assert_matches;
 
     /// Default test pair
     pub fn pair() -> Pair {
@@ -696,6 +692,135 @@ mod tests {
             rng,
             None,
         )
+    }
+
+    // TODO
+    // #[test]
+    // fn test_new_without_fees() {
+    // }
+
+    #[test]
+    fn test_new_with_fee_payout() {
+        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
+        let non_fee_account = AccountKey::random(&mut rng);
+
+        // A non-partial fill SCI with one output gets rejected
+        let sci = create_sci(&pair(), 10, 20, &mut rng);
+        assert_eq!(
+            Quote::new_with_fee_payout(sci, None, fee_account.view_private_key(), 100),
+            Err(Error::UnsupportedSci(
+                "Unsupported number of required/partial outputs 1/0".into()
+            ))
+        );
+
+        // An SCI with one partial output gets rejected
+        let sci = create_partial_sci(&pair(), 10, 0, 0, 100, &mut rng);
+        assert_eq!(
+            Quote::new_with_fee_payout(sci, None, fee_account.view_private_key(), 100),
+            Err(Error::UnsupportedSci(
+                "Unsupported number of required/partial outputs 0/1".into()
+            ))
+        );
+
+        // A non-partial fill SCI paying fees to the wrong address gets rejected.
+        let sci = create_sci_with_fee_payout(
+            &pair(),
+            100,
+            200,
+            &non_fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        assert_eq!(
+            Quote::new_with_fee_payout(sci, None, fee_account.view_private_key(), 100),
+            Err(Error::UnsupportedSci(
+                "Neither of the required outputs pays the fee address".into()
+            ))
+        );
+
+        // Helper struct for partial fill tests
+        struct PartialSciParams {
+            base_amount_offered: u64,
+            min_base_fill_amount: u64,
+            required_base_change_amount: u64,
+            counter_amount: u64,
+        }
+        let partial_sci_test_cases = &[
+            // No required change, no minimum fill
+            PartialSciParams {
+                base_amount_offered: 1000,
+                min_base_fill_amount: 0,
+                required_base_change_amount: 0,
+                counter_amount: 2000,
+            },
+            // No required change, minimum required fill
+            PartialSciParams {
+                base_amount_offered: 1000,
+                min_base_fill_amount: 200,
+                required_base_change_amount: 0,
+                counter_amount: 2000,
+            },
+            // Required change, no minimum
+            PartialSciParams {
+                base_amount_offered: 1000,
+                min_base_fill_amount: 0,
+                required_base_change_amount: 100,
+                counter_amount: 2000,
+            },
+            // Required change, minimum required fill
+            PartialSciParams {
+                base_amount_offered: 1000,
+                min_base_fill_amount: 200,
+                required_base_change_amount: 100,
+                counter_amount: 2000,
+            },
+        ];
+
+        for test_case in partial_sci_test_cases {
+            // Paying the wrong fee address gets rejected
+            let sci = create_partial_sci_with_fee_payout(
+                &pair(),
+                test_case.base_amount_offered,
+                test_case.min_base_fill_amount,
+                test_case.required_base_change_amount,
+                test_case.counter_amount,
+                &non_fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            );
+            assert_eq!(
+                Quote::new_with_fee_payout(sci, None, fee_account.view_private_key(), 100),
+                Err(Error::UnsupportedSci(
+                    "Neither of the partial fill outputs pays the fee address".into()
+                ))
+            );
+
+            // Paying less than the required fee gets rejected
+            let sci = create_partial_sci_with_fee_payout(
+                &pair(),
+                test_case.base_amount_offered,
+                test_case.min_base_fill_amount,
+                test_case.required_base_change_amount,
+                test_case.counter_amount,
+                &fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            );
+            assert_matches!(
+                Quote::new_with_fee_payout(sci.clone(), None, fee_account.view_private_key(), 150),
+                Err(Error::UnsupportedSci(
+                    err_str
+                )) if err_str.starts_with("Expected a required fee output of at least")
+            );
+
+            // Paying the right amount of fee works
+            assert_matches!(
+                Quote::new_with_fee_payout(sci, None, fee_account.view_private_key(), 100),
+                Ok(_)
+            );
+
+        }
     }
 
     #[test]
