@@ -38,6 +38,18 @@ pub enum SciType {
     },
 }
 
+impl SciType {
+    pub fn counter_amount(&self) -> Amount {
+        match self {
+            Self::NonPartialNoFee { counter_amount }
+            | Self::NonPartialPercentageFee { counter_amount, .. } => Amount::from(counter_amount),
+
+            Self::PartialNoFee { counter_amount, .. }
+            | Self::PartialPercentageFee { counter_amount, .. } => counter_amount.clone(),
+        }
+    }
+}
+
 /// A single "quote" in the book. This is a wrapper around an SCI and some
 /// auxiliary data
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -102,7 +114,7 @@ impl Quote {
             return Err(Error::UnsupportedSci("Missing input rules".into()));
         };
 
-        let (counter_token_id, base_range, max_counter_tokens, sci_type) = match (
+        let (base_range, sci_type) = match (
             input_rules.required_outputs.len(),
             input_rules.partial_fill_outputs.len(),
         ) {
@@ -110,11 +122,9 @@ impl Quote {
             (1, 0) => {
                 // Single required non-partial output
                 (
-                    TokenId::from(sci.required_output_amounts[0].token_id),
                     sci.pseudo_output_amount.value..=sci.pseudo_output_amount.value,
-                    sci.required_output_amounts[0].value,
                     SciType::NonPartialNoFee {
-                        counter_amount: sci.required_output_amounts[0],
+                        counter_amount: sci.required_output_amounts[0].clone(),
                     },
                 )
             }
@@ -150,9 +160,7 @@ impl Quote {
                 }
 
                 (
-                    amount.token_id,
                     min_base_amount..=max_base_amount,
-                    amount.value,
                     SciType::PartialNoFee {
                         counter_amount: amount,
                         base_change_amount,
@@ -172,7 +180,7 @@ impl Quote {
 
         let pair = Pair {
             base_token_id,
-            counter_token_id,
+            counter_token_id: sci_type.counter_amount().token_id,
         };
 
         Ok(Self {
@@ -180,7 +188,7 @@ impl Quote {
             id,
             pair,
             base_range,
-            max_counter_tokens,
+            max_counter_tokens: sci_type.counter_amount().value,
             timestamp,
             sci_type,
         })
@@ -226,7 +234,7 @@ impl Quote {
             return Err(Error::UnsupportedSci("Missing input rules".into()));
         };
 
-        let (counter_token_id, base_range, max_counter_tokens, sci_type) = match (
+        let (base_range, sci_type) = match (
             input_rules.required_outputs.len(),
             input_rules.partial_fill_outputs.len(),
         ) {
@@ -277,12 +285,10 @@ impl Quote {
                 }
 
                 (
-                    TokenId::from(sci.required_output_amounts[counter_index].token_id),
                     sci.pseudo_output_amount.value..=sci.pseudo_output_amount.value,
-                    sci.required_output_amounts[counter_index].value,
                     SciType::NonPartialPercentageFee {
-                        counter_amount: sci.required_output_amounts[counter_index],
-                        fee_amount: sci.required_output_amounts[fee_index],
+                        counter_amount: sci.required_output_amounts[counter_index].clone(),
+                        fee_amount: sci.required_output_amounts[fee_index].clone(),
                     },
                 )
             }
@@ -374,9 +380,7 @@ impl Quote {
                 }
 
                 (
-                    counter_amount.token_id,
                     min_base_amount..=max_base_amount,
-                    counter_amount.value,
                     SciType::PartialPercentageFee {
                         counter_amount,
                         base_change_amount,
@@ -397,7 +401,7 @@ impl Quote {
 
         let pair = Pair {
             base_token_id,
-            counter_token_id,
+            counter_token_id: sci_type.counter_amount().token_id,
         };
 
         Ok(Self {
@@ -405,7 +409,7 @@ impl Quote {
             id,
             pair,
             base_range,
-            max_counter_tokens,
+            max_counter_tokens: sci_type.counter_amount().value,
             timestamp,
             sci_type,
         })
@@ -485,7 +489,7 @@ impl Quote {
             return Err(Error::UnsupportedSci("Missing input rules".into()));
         };
 
-        match self.sci_type {
+        match &self.sci_type {
             SciType::NonPartialNoFee { counter_amount }
             | SciType::NonPartialPercentageFee { counter_amount, .. } => {
                 // Single required non-partial output. This quote can only execute if are taking
