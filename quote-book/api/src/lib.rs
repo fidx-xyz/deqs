@@ -4,11 +4,13 @@
 
 mod basic_types;
 mod error;
+mod fee_config;
 mod quote;
 mod quote_book;
 
 pub use basic_types::{Pair, QuoteId};
 pub use error::Error;
+pub use fee_config::FeeConfig;
 pub use quote::Quote;
 pub use quote_book::QuoteBook;
 

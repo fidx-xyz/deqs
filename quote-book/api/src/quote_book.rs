@@ -4,35 +4,36 @@ use crate::{Error, Pair, Quote, QuoteId};
 use mc_blockchain_types::BlockIndex;
 use mc_crypto_keys::RistrettoPrivate;
 use mc_crypto_ring_signature::KeyImage;
+use mc_transaction_core::PublicAddress;
 use mc_transaction_extra::SignedContingentInput;
 use std::ops::RangeBounds;
 
 /// Quote book functionality for a single trading pair
 pub trait QuoteBook: Clone + Send + Sync + 'static {
+    /// The public address this quote book expects fees at
+    fn fee_address(&self) -> PublicAddress;
+
+    /// The number of basis points each quote needs to pay the fee address.
+    fn fee_basis_points(&self) -> u16;
+
+    /// The private view key of the fee address.
+    /// This is needed to make the interface of `add_sci` more ergonomic.
+    fn fee_view_private_key(&self) -> RistrettoPrivate;
+
     /// Add an SCI to the quote book.
     ///
     /// # Arguments
     /// * `sci` - The SCI to add.
     /// * `timestamp` - The timestamp of the block containing the SCI. If not
     ///   provided, the current system time is used.
-    /// * `fee_view_private_key` - The view private key of the DEQS fee address.
-    ///   Used to identify which of the outputs pays out the fees
-    /// * `required_fee_basis_points` - How many basis points of fees are we
-    ///   requiring. The fee is paid in the counter asset.
     #[allow(clippy::result_large_err)]
-    fn add_sci(
-        &self,
-        sci: SignedContingentInput,
-        timestamp: Option<u64>,
-        fee_view_private_key: &RistrettoPrivate,
-        required_fee_basis_points: u16,
-    ) -> Result<Quote, Error> {
+    fn add_sci(&self, sci: SignedContingentInput, timestamp: Option<u64>) -> Result<Quote, Error> {
         // Convert SCI into an quote. This also validates it.
         let quote = Quote::new(
             sci,
             timestamp,
-            fee_view_private_key,
-            required_fee_basis_points,
+            &self.fee_view_private_key(),
+            self.fee_basis_points(),
         )?;
         self.add_quote(&quote)?;
         Ok(quote)

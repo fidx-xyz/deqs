@@ -99,21 +99,18 @@ pub fn create_partial_sci(
 pub fn basic_happy_flow(quote_book: &impl QuoteBook, ledger_db: Option<&LedgerDB>) {
     let pair = pair();
     let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-    let fee_account = AccountKey::random(&mut rng);
 
     // Adding an quote should work
     let sci = create_sci(
         &pair,
         10,
         20,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let quote = quote_book
-        .add_sci(sci, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let quote = quote_book.add_sci(sci, None).unwrap();
 
     let quotes = quote_book.get_quotes(&pair, .., 0).unwrap();
     assert_eq!(quotes, vec![quote.clone()]);
@@ -123,14 +120,12 @@ pub fn basic_happy_flow(quote_book: &impl QuoteBook, ledger_db: Option<&LedgerDB
         &pair,
         10,
         200,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let quote2 = quote_book
-        .add_sci(sci, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let quote2 = quote_book.add_sci(sci, None).unwrap();
 
     let quotes = quote_book.get_quotes(&pair, .., 0).unwrap();
     assert_eq!(quotes, vec![quote.clone(), quote2.clone()]);
@@ -169,14 +164,12 @@ pub fn basic_happy_flow(quote_book: &impl QuoteBook, ledger_db: Option<&LedgerDB
         &pair,
         10,
         20,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let quote1 = quote_book
-        .add_sci(sci, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let quote1 = quote_book.add_sci(sci, None).unwrap();
     let quote1_tombstone = quote
         .sci()
         .tx_in
@@ -189,31 +182,33 @@ pub fn basic_happy_flow(quote_book: &impl QuoteBook, ledger_db: Option<&LedgerDB
     sci_builder.set_tombstone_block(quote1_tombstone - 1);
     sci_builder
         .add_required_output(
-            Amount::new(calc_fee_amount(20, 100), pair.counter_token_id),
-            &fee_account.default_subaddress(),
+            Amount::new(
+                calc_fee_amount(20, quote_book.fee_basis_points()),
+                pair.counter_token_id,
+            ),
+            &quote_book.fee_address(),
             &mut rng,
         )
         .unwrap();
 
     let sci2 = sci_builder.build(&NoKeysRingSigner {}, &mut rng).unwrap();
-    let quote2 = quote_book
-        .add_sci(sci2, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let quote2 = quote_book.add_sci(sci2, None).unwrap();
 
     let mut sci_builder = create_sci_builder(&pair, 10, 20, &mut rng, ledger_db);
     sci_builder.set_tombstone_block(0);
     sci_builder
         .add_required_output(
-            Amount::new(calc_fee_amount(20, 100), pair.counter_token_id),
-            &fee_account.default_subaddress(),
+            Amount::new(
+                calc_fee_amount(20, quote_book.fee_basis_points()),
+                pair.counter_token_id,
+            ),
+            &quote_book.fee_address(),
             &mut rng,
         )
         .unwrap();
 
     let sci3 = sci_builder.build(&NoKeysRingSigner {}, &mut rng).unwrap();
-    let quote3 = quote_book
-        .add_sci(sci3, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let quote3 = quote_book.add_sci(sci3, None).unwrap();
 
     assert_eq!(
         quote_book
@@ -250,7 +245,6 @@ pub fn basic_happy_flow(quote_book: &impl QuoteBook, ledger_db: Option<&LedgerDB
 pub fn cannot_add_invalid_sci(quote_book: &impl QuoteBook, ledger_db: Option<&LedgerDB>) {
     let pair = pair();
     let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-    let fee_account = AccountKey::random(&mut rng);
 
     // Make an SCI invalid by adding some random required output
     let mut sci_builder = create_sci_builder(&pair, 10, 20, &mut rng, ledger_db);
@@ -266,10 +260,10 @@ pub fn cannot_add_invalid_sci(quote_book: &impl QuoteBook, ledger_db: Option<&Le
     let sci = sci_builder.build(&NoKeysRingSigner {}, &mut rng).unwrap();
 
     assert_eq!(
-        quote_book
-            .add_sci(sci, None, fee_account.view_private_key(), 100)
-            .unwrap_err(),
-        Error::UnsupportedSci("Unsupported number of required/partial outputs 2/0".into())
+        quote_book.add_sci(sci, None).unwrap_err(),
+        Error::UnsupportedSci(
+            "Both required non-partial outputs should be the same token id".into()
+        )
     );
 
     // Make an SCI invalid by messing with the MLSAG
@@ -277,17 +271,15 @@ pub fn cannot_add_invalid_sci(quote_book: &impl QuoteBook, ledger_db: Option<&Le
         &pair,
         10,
         20,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
     sci.mlsag.responses.pop();
 
     assert_eq!(
-        quote_book
-            .add_sci(sci, None, fee_account.view_private_key(), 100)
-            .unwrap_err(),
+        quote_book.add_sci(sci, None).unwrap_err(),
         Error::Sci(SignedContingentInputError::RingSignature(
             RingSignatureError::LengthMismatch(22, 21),
         ))
@@ -297,24 +289,21 @@ pub fn cannot_add_invalid_sci(quote_book: &impl QuoteBook, ledger_db: Option<&Le
 pub fn cannot_add_duplicate_sci(quote_book: &impl QuoteBook, ledger_db: Option<&LedgerDB>) {
     let pair = pair();
     let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-    let fee_account = AccountKey::random(&mut rng);
 
     let sci = create_sci(
         &pair,
         10,
         20,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let quote1 = quote_book
-        .add_sci(sci.clone(), None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let quote1 = quote_book.add_sci(sci.clone(), None).unwrap();
 
     // Trying to add the exact same SCI should fail
     assert_matches!(
-        quote_book.add_sci(sci.clone(), None, fee_account.view_private_key(), 100).unwrap_err(),
+        quote_book.add_sci(sci.clone(), None).unwrap_err(),
         Error::QuoteAlreadyExists { existing_quote } if *existing_quote == quote1
     );
 
@@ -323,7 +312,7 @@ pub fn cannot_add_duplicate_sci(quote_book: &impl QuoteBook, ledger_db: Option<&
     sci2.tx_out_global_indices[0] += 1;
 
     assert_matches!(
-        quote_book.add_sci(sci2.clone(), None, fee_account.view_private_key(), 100).unwrap_err(),
+        quote_book.add_sci(sci2.clone(), None).unwrap_err(),
         Error::QuoteAlreadyExists { existing_quote } if *existing_quote == quote1
     );
 
@@ -331,7 +320,13 @@ pub fn cannot_add_duplicate_sci(quote_book: &impl QuoteBook, ledger_db: Option<&
     // identical.
     assert_eq!(sci.key_image(), sci2.key_image());
 
-    let quote2 = Quote::new(sci2, None, fee_account.view_private_key(), 100).unwrap();
+    let quote2 = Quote::new(
+        sci2,
+        None,
+        &quote_book.fee_view_private_key(),
+        quote_book.fee_basis_points(),
+    )
+    .unwrap();
     assert_ne!(quote1.id(), quote2.id());
     assert_eq!(quote1.key_image(), quote2.key_image());
 }
@@ -344,21 +339,18 @@ pub fn get_quotes_filtering_works(quote_book: &impl QuoteBook, ledger_db: Option
         counter_token_id: TokenId::from(2),
     };
     let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-    let fee_account = AccountKey::random(&mut rng);
 
     // Offer for trading 100 pair1.base tokens into 1000 pair1.counter tokens
     let sci = create_sci(
         &pair1,
         100,
         1000,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let p1_100_for_1000 = quote_book
-        .add_sci(sci, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let p1_100_for_1000 = quote_book.add_sci(sci, None).unwrap();
 
     // Offer for partially trading up to 100 pair2.base tokens into 1000
     // pair2.counter tokens
@@ -368,14 +360,12 @@ pub fn get_quotes_filtering_works(quote_book: &impl QuoteBook, ledger_db: Option
         1,
         0,
         1000,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let p2_100_for_1000 = quote_book
-        .add_sci(sci, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let p2_100_for_1000 = quote_book.add_sci(sci, None).unwrap();
 
     // Offer for partially trading 5 pair2.base tokens into 50 pair2.counter
     // tokens
@@ -385,14 +375,12 @@ pub fn get_quotes_filtering_works(quote_book: &impl QuoteBook, ledger_db: Option
         1,
         0,
         50,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let p2_5_for_50 = quote_book
-        .add_sci(sci, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let p2_5_for_50 = quote_book.add_sci(sci, None).unwrap();
 
     // Offer for partially trading 50 pair2.base tokens into 5 pair2.counter
     // tokens
@@ -402,14 +390,12 @@ pub fn get_quotes_filtering_works(quote_book: &impl QuoteBook, ledger_db: Option
         1,
         0,
         5,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let p2_50_for_5 = quote_book
-        .add_sci(sci, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let p2_50_for_5 = quote_book.add_sci(sci, None).unwrap();
 
     // Offer for exactly trading 50 pair2.base tokens into 3 pair2.counter
     // tokens
@@ -417,14 +403,12 @@ pub fn get_quotes_filtering_works(quote_book: &impl QuoteBook, ledger_db: Option
         &pair2,
         50,
         3,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let p2_50_for_3 = quote_book
-        .add_sci(sci, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let p2_50_for_3 = quote_book.add_sci(sci, None).unwrap();
 
     // Get all quotes at any quantity.
     let quotes = quote_book.get_quotes(&pair1, .., 0).unwrap();
@@ -497,46 +481,39 @@ pub fn get_quote_ids_works(quote_book: &impl QuoteBook, ledger_db: Option<&Ledge
         counter_token_id: TokenId::from(2),
     };
     let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-    let fee_account = AccountKey::random(&mut rng);
 
     let pair1_sci1 = create_sci(
         &pair1,
         100,
         1000,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let quote1 = quote_book
-        .add_sci(pair1_sci1, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let quote1 = quote_book.add_sci(pair1_sci1, None).unwrap();
 
     let pair1_sci2 = create_sci(
         &pair1,
         100,
         1000,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let quote2 = quote_book
-        .add_sci(pair1_sci2, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let quote2 = quote_book.add_sci(pair1_sci2, None).unwrap();
 
     let pair2_sci3 = create_sci(
         &pair2,
         100,
         1000,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let quote3 = quote_book
-        .add_sci(pair2_sci3, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let quote3 = quote_book.add_sci(pair2_sci3, None).unwrap();
 
     // Without filtering, we should get all quote ids.
     let quote_ids = quote_book.get_quote_ids(None).unwrap();
@@ -566,31 +543,34 @@ pub fn get_quote_ids_works(quote_book: &impl QuoteBook, ledger_db: Option<&Ledge
 pub fn get_quote_by_id_works(quote_book: &impl QuoteBook, ledger_db: Option<&LedgerDB>) {
     let pair1 = pair();
     let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-    let fee_account = AccountKey::random(&mut rng);
 
     let sci1 = create_sci(
         &pair1,
         100,
         1000,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let quote1 = quote_book
-        .add_sci(sci1, None, fee_account.view_private_key(), 100)
-        .unwrap();
+    let quote1 = quote_book.add_sci(sci1, None).unwrap();
 
     let sci2 = create_sci(
         &pair1,
         100,
         1000,
-        &fee_account.default_subaddress(),
-        100,
+        &quote_book.fee_address(),
+        quote_book.fee_basis_points(),
         &mut rng,
         ledger_db,
     );
-    let quote2 = Quote::new(sci2, None, fee_account.view_private_key(), 100).unwrap();
+    let quote2 = Quote::new(
+        sci2,
+        None,
+        &quote_book.fee_view_private_key(),
+        quote_book.fee_basis_points(),
+    )
+    .unwrap();
 
     assert_eq!(
         quote_book.get_quote_by_id(quote1.id()).unwrap(),
