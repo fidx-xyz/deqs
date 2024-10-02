@@ -86,7 +86,7 @@ pub fn create_sci(
     base_amount: u64,
     counter_amount: u64,
     fee_address: &PublicAddress,
-    fee_basis_points: u16,
+    fee_amount: u64,
     rng: &mut (impl RngCore + CryptoRng),
     ledger_db: Option<&LedgerDB>,
 ) -> SignedContingentInput {
@@ -99,8 +99,6 @@ pub fn create_sci(
         ledger_db,
     );
 
-    // TODO round up?
-    let fee_amount = (counter_amount as u128) * (fee_basis_points as u128) / 10000u128;
     builder
         .add_required_output(
             Amount::new(fee_amount as u64, counter_token_id),
@@ -212,7 +210,7 @@ pub fn create_partial_sci(
     required_base_change_amount: u64,
     counter_amount: u64,
     fee_address: &PublicAddress,
-    fee_basis_points: u16,
+    fee_amount: u64,
     rng: &mut (impl RngCore + CryptoRng),
     ledger_db: Option<&LedgerDB>,
 ) -> SignedContingentInput {
@@ -227,8 +225,6 @@ pub fn create_partial_sci(
         ledger_db,
     );
 
-    // TODO round up?
-    let fee_amount = (counter_amount as u128) * (fee_basis_points as u128) / 10000u128;
     builder
         .add_partial_fill_output(
             Amount::new(fee_amount as u64, counter_token_id),

@@ -1,6 +1,6 @@
 // Copyright (c) 2023 MobileCoin Inc.
 
-use crate::{Error, Pair, QuoteId};
+use crate::{calc_fee_amount, Error, Pair, QuoteId};
 use mc_crypto_keys::RistrettoPrivate;
 use mc_transaction_extra::SignedContingentInput;
 use mc_transaction_types::TokenId;
@@ -110,11 +110,10 @@ impl Quote {
                     ));
                 };
 
-                // TODO do we want to round up?
-                let required_fee_amount = ((sci.required_output_amounts[counter_index].value
-                    as u128)
-                    * (required_fee_basis_points as u128)
-                    / 10000u128) as u64;
+                let required_fee_amount = calc_fee_amount(
+                    sci.required_output_amounts[counter_index].value,
+                    required_fee_basis_points,
+                );
                 if required_fee_amount > sci.required_output_amounts[fee_index].value {
                     return Err(Error::UnsupportedSci(format!(
                         "Expected a required fee output of at least {required_fee_amount}, got {}",
@@ -177,10 +176,9 @@ impl Quote {
                 let counter_amount = partial_amounts[counter_index];
                 let fee_amount = partial_amounts[fee_index];
 
-                // TODO do we want to round up?
-                let required_fee_amount = ((counter_amount.value as u128)
-                    * (required_fee_basis_points as u128)
-                    / 10000u128) as u64;
+                let required_fee_amount =
+                    calc_fee_amount(counter_amount.value, required_fee_basis_points);
+
                 if required_fee_amount > fee_amount.value {
                     return Err(Error::UnsupportedSci(format!(
                         "Expected a required fee output of at least {required_fee_amount}, got {}",
@@ -411,9 +409,12 @@ impl PartialOrd for Quote {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deqs_mc_test_utils::{create_partial_sci_builder, create_sci_builder};
+    use mc_crypto_ring_signature_signer::NoKeysRingSigner;
     use mc_transaction_core::{AccountKey, PublicAddress};
     use rand::{prelude::SliceRandom, rngs::StdRng, SeedableRng};
     use rand_core::{CryptoRng, RngCore};
+    use std::assert_matches::assert_matches;
 
     /// Default test pair
     pub fn pair() -> Pair {
@@ -440,7 +441,7 @@ mod tests {
             base_amount,
             counter_amount,
             fee_address,
-            fee_basis_points,
+            calc_fee_amount(counter_amount, fee_basis_points),
             rng,
             None,
         )
@@ -467,10 +468,153 @@ mod tests {
             required_base_change_amount,
             counter_amount,
             fee_address,
-            fee_basis_points,
+            calc_fee_amount(counter_amount, fee_basis_points),
             rng,
             None,
         )
+    }
+
+    #[test]
+    fn test_new() {
+        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
+        let non_fee_account = AccountKey::random(&mut rng);
+
+        // A non-partial fill SCI with one output gets rejected
+        let sci = create_sci_builder(
+            pair().base_token_id,
+            pair().counter_token_id,
+            10,
+            20,
+            &mut rng,
+            None,
+        )
+        .build(&NoKeysRingSigner {}, &mut rng)
+        .unwrap();
+        assert_eq!(
+            Quote::new(sci, None, fee_account.view_private_key(), 100),
+            Err(Error::UnsupportedSci(
+                "Unsupported number of required/partial outputs 1/0".into()
+            ))
+        );
+
+        // An SCI with one partial output gets rejected
+        let sci = create_partial_sci_builder(
+            pair().base_token_id,
+            pair().counter_token_id,
+            10,
+            0,
+            0,
+            100,
+            &mut rng,
+            None,
+        )
+        .build(&NoKeysRingSigner {}, &mut rng)
+        .unwrap();
+        assert_eq!(
+            Quote::new(sci, None, fee_account.view_private_key(), 100),
+            Err(Error::UnsupportedSci(
+                "Unsupported number of required/partial outputs 0/1".into()
+            ))
+        );
+
+        // A non-partial fill SCI paying fees to the wrong address gets rejected.
+        let sci = create_sci(
+            &pair(),
+            100,
+            200,
+            &non_fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        assert_eq!(
+            Quote::new(sci, None, fee_account.view_private_key(), 100),
+            Err(Error::UnsupportedSci(
+                "Neither of the required outputs pays the fee address".into()
+            ))
+        );
+
+        // Helper struct for partial fill tests
+        struct PartialSciParams {
+            base_amount_offered: u64,
+            min_base_fill_amount: u64,
+            required_base_change_amount: u64,
+            counter_amount: u64,
+        }
+        let partial_sci_test_cases = &[
+            // No required change, no minimum fill
+            PartialSciParams {
+                base_amount_offered: 1000,
+                min_base_fill_amount: 0,
+                required_base_change_amount: 0,
+                counter_amount: 2000,
+            },
+            // No required change, minimum required fill
+            PartialSciParams {
+                base_amount_offered: 1000,
+                min_base_fill_amount: 200,
+                required_base_change_amount: 0,
+                counter_amount: 2000,
+            },
+            // Required change, no minimum
+            PartialSciParams {
+                base_amount_offered: 1000,
+                min_base_fill_amount: 0,
+                required_base_change_amount: 100,
+                counter_amount: 2000,
+            },
+            // Required change, minimum required fill
+            PartialSciParams {
+                base_amount_offered: 1000,
+                min_base_fill_amount: 200,
+                required_base_change_amount: 100,
+                counter_amount: 2000,
+            },
+        ];
+
+        for test_case in partial_sci_test_cases {
+            // Paying the wrong fee address gets rejected
+            let sci = create_partial_sci(
+                &pair(),
+                test_case.base_amount_offered,
+                test_case.min_base_fill_amount,
+                test_case.required_base_change_amount,
+                test_case.counter_amount,
+                &non_fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            );
+            assert_eq!(
+                Quote::new(sci, None, fee_account.view_private_key(), 100),
+                Err(Error::UnsupportedSci(
+                    "Neither of the partial fill outputs pays the fee address".into()
+                ))
+            );
+
+            // Paying less than the required fee gets rejected
+            let sci = create_partial_sci(
+                &pair(),
+                test_case.base_amount_offered,
+                test_case.min_base_fill_amount,
+                test_case.required_base_change_amount,
+                test_case.counter_amount,
+                &fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            );
+            assert_matches!(
+                Quote::new(sci.clone(), None, fee_account.view_private_key(), 150),
+                Err(Error::UnsupportedSci(
+                    err_str
+                )) if err_str.starts_with("Expected a required fee output of at least")
+            );
+
+            // Paying the right amount of fee works
+            assert_matches!(
+                Quote::new(sci, None, fee_account.view_private_key(), 100),
+                Ok(_)
+            );
+        }
     }
 
     #[test]
