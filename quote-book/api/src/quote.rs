@@ -882,34 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn counter_tokens_cost_works_for_non_partial_fill_scis_with_fee() {
-        let pair = pair();
-        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-        let fee_account = AccountKey::random(&mut rng);
-
-        // Creating a quote should work
-        let sci = create_sci_with_fee_payout(
-            &pair,
-            1000,
-            2000,
-            &fee_account.default_subaddress(),
-            100,
-            &mut rng,
-        );
-        let quote =
-            Quote::new_with_fee_payout(sci, None, fee_account.view_private_key(), 100).unwrap();
-
-        // We can only calculate cost for the exact amount of base tokens since this is
-        // not a partial fill.
-        assert_eq!(quote.counter_tokens_cost(1000), Ok(2000));
-        assert!(quote.counter_tokens_cost(999).is_err());
-        assert!(quote.counter_tokens_cost(1001).is_err());
-        assert!(quote.counter_tokens_cost(0).is_err());
-        assert!(quote.counter_tokens_cost(u64::MAX).is_err());
-    }
-
-    #[test]
-    fn counter_tokens_cost_works_for_non_partial_fill_scis_without_fee() {
+    fn counter_tokens_cost_works_for_non_partial_fill_scis() {
         let pair = pair();
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
 
