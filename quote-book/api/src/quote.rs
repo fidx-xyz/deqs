@@ -19,7 +19,10 @@ pub enum SciType {
     NonPartialNoFee { counter_amount: UnmaskedAmount },
 
     /// An SCI exchanging a partial input without paying fees
-    PartialNoFee { counter_amount: Amount },
+    PartialNoFee {
+        counter_amount: Amount,
+        base_change_amount: Option<UnmaskedAmount>,
+    },
 
     /// An SCI exchanging a non-partial input and pays a percentage-based fee
     NonPartialPercentageFee {
@@ -30,11 +33,10 @@ pub enum SciType {
     /// An SCI exchanging a partial input and pays a percentage-based fee
     PartialPercentageFee {
         counter_amount: Amount,
+        base_change_amount: Option<UnmaskedAmount>,
         fee_amount: Amount,
     },
 }
-
-
 
 /// A single "quote" in the book. This is a wrapper around an SCI and some
 /// auxiliary data
@@ -121,6 +123,7 @@ impl Quote {
                 let (amount, _) = input_rules.partial_fill_outputs[0].reveal_amount()?;
                 let min_base_amount = input_rules.min_partial_fill_value;
                 let mut max_base_amount = sci.pseudo_output_amount.value;
+                let mut base_change_amount = None;
 
                 // If we have a required output in addition to our partial output, we would
                 // expect it to be a change output. We assume its change if it
@@ -142,6 +145,8 @@ impl Quote {
                                 max_base_amount, sci.required_output_amounts[0].value
                             ))
                         })?;
+
+                    base_change_amount = Some(sci.required_output_amounts[0].clone());
                 }
 
                 (
@@ -150,6 +155,7 @@ impl Quote {
                     amount.value,
                     SciType::PartialNoFee {
                         counter_amount: amount,
+                        base_change_amount,
                     },
                 )
             }
@@ -341,6 +347,7 @@ impl Quote {
 
                 let min_base_amount = input_rules.min_partial_fill_value;
                 let mut max_base_amount = sci.pseudo_output_amount.value;
+                let mut base_change_amount = None;
 
                 // If we have a required output in addition to our partial output, we would
                 // expect it to be a change output. We assume its change if it
@@ -362,6 +369,8 @@ impl Quote {
                                 max_base_amount, sci.required_output_amounts[0].value
                             ))
                         })?;
+
+                    base_change_amount = Some(sci.required_output_amounts[0].clone());
                 }
 
                 (
@@ -369,7 +378,8 @@ impl Quote {
                     min_base_amount..=max_base_amount,
                     counter_amount.value,
                     SciType::PartialPercentageFee {
-                        counter_amount: counter_amount,
+                        counter_amount,
+                        base_change_amount,
                         fee_amount,
                     },
                 )
@@ -469,22 +479,15 @@ impl Quote {
             return Err(Error::InsufficientBaseTokens(base_tokens));
         }
 
-        // TODO: This is making strong assumptions about the structure of the SCI and
-        // doesn't currently take into account the scenario where we would also
-        // want a fee output to pay the DEQS.
         let input_rules = if let Some(input_rules) = self.sci.tx_in.input_rules.as_ref() {
             input_rules
         } else {
             return Err(Error::UnsupportedSci("Missing input rules".into()));
         };
 
-        match (
-            input_rules.required_outputs.len(),
-            input_rules.partial_fill_outputs.len(),
-        ) {
-            (0, 0) => Err(Error::UnsupportedSci("No required/partial outputs".into())),
-
-            (1, 0) => {
+        match self.sci_type {
+            SciType::NonPartialNoFee { counter_amount }
+            | SciType::NonPartialPercentageFee { counter_amount, .. } => {
                 // Single required non-partial output. This quote can only execute if are taking
                 // the entire amount.
                 // The assert here makes sense since we should only get here if base_tokens is a
@@ -492,11 +495,19 @@ impl Quote {
                 assert!(base_tokens == self.sci.pseudo_output_amount.value);
 
                 // In a non-partial swap, the fulfiller need to provide the amount specified in
-                // the (only, for now) required output.
-                Ok(self.sci.required_output_amounts[0].value)
+                // the required output.
+                Ok(counter_amount.value)
             }
 
-            (num_required_outputs @ (0 | 1), 1) => {
+            SciType::PartialNoFee {
+                counter_amount,
+                base_change_amount,
+            }
+            | SciType::PartialPercentageFee {
+                counter_amount,
+                base_change_amount,
+                ..
+            } => {
                 // Single partial output or a single partial output + change amount.
                 // The fact that the required output is treated as change has been verified when
                 // the Quote was created.
@@ -508,9 +519,9 @@ impl Quote {
                 // The amount we are taking must be below the maximum available. It is expected
                 // to be, since we checked base_range at the beginning.
                 let mut max_available_amount = self.sci.pseudo_output_amount.value;
-                if num_required_outputs == 1 {
-                    assert!(max_available_amount > self.sci.required_output_amounts[0].value);
-                    max_available_amount -= self.sci.required_output_amounts[0].value;
+                if let Some(base_change_amount) = base_change_amount {
+                    assert!(max_available_amount > base_change_amount.value);
+                    max_available_amount -= base_change_amount.value;
                 };
                 assert!(base_tokens <= max_available_amount);
 
@@ -521,17 +532,10 @@ impl Quote {
                 // Calculate the number of counter tokens we need to return as change to the
                 // offerer of the SCI. It is calculated as a fraction of the partial fill
                 // output.
-                let (amount, _) = input_rules.partial_fill_outputs[0].reveal_amount()?;
-                let num_128 = amount.value as u128 * fill_fraction_num;
+                let num_128 = counter_amount.value as u128 * fill_fraction_num;
                 // Divide and round down
                 Ok((num_128 / fill_fractions_denom) as u64)
             }
-
-            _ => Err(Error::UnsupportedSci(format!(
-                "Unsupported number of required/partial outputs {}/{}",
-                input_rules.required_outputs.len(),
-                input_rules.partial_fill_outputs.len()
-            ))),
         }
     }
 }
