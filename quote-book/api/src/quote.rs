@@ -2,6 +2,7 @@
 
 use crate::{Error, Pair, QuoteId};
 use mc_crypto_keys::RistrettoPrivate;
+use mc_transaction_core::{Amount, UnmaskedAmount};
 use mc_transaction_extra::SignedContingentInput;
 use mc_transaction_types::TokenId;
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,30 @@ use std::{
     ops::{Deref, RangeInclusive},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+/// Possible SCI types we recognize and details about them
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum SciType {
+    /// An SCI exchanging a non-partial input without paying fees
+    NonPartialNoFee { counter_amount: UnmaskedAmount },
+
+    /// An SCI exchanging a partial input without paying fees
+    PartialNoFee { counter_amount: Amount },
+
+    /// An SCI exchanging a non-partial input and pays a percentage-based fee
+    NonPartialPercentageFee {
+        counter_amount: UnmaskedAmount,
+        fee_amount: UnmaskedAmount,
+    },
+
+    /// An SCI exchanging a partial input and pays a percentage-based fee
+    PartialPercentageFee {
+        counter_amount: Amount,
+        fee_amount: Amount,
+    },
+}
+
+
 
 /// A single "quote" in the book. This is a wrapper around an SCI and some
 /// auxiliary data
@@ -35,6 +60,9 @@ pub struct Quote {
 
     /// Timestamp at which the quote arrived, in nanoseconds since the Epoch.
     timestamp: u64,
+
+    /// Data that varies based on the type of SCI we have
+    sci_type: SciType,
 }
 
 impl Quote {
@@ -72,7 +100,7 @@ impl Quote {
             return Err(Error::UnsupportedSci("Missing input rules".into()));
         };
 
-        let (counter_token_id, base_range, max_counter_tokens) = match (
+        let (counter_token_id, base_range, max_counter_tokens, sci_type) = match (
             input_rules.required_outputs.len(),
             input_rules.partial_fill_outputs.len(),
         ) {
@@ -83,6 +111,9 @@ impl Quote {
                     TokenId::from(sci.required_output_amounts[0].token_id),
                     sci.pseudo_output_amount.value..=sci.pseudo_output_amount.value,
                     sci.required_output_amounts[0].value,
+                    SciType::NonPartialNoFee {
+                        counter_amount: sci.required_output_amounts[0],
+                    },
                 )
             }
             (num_required_outputs @ (0 | 1), 1) => {
@@ -117,6 +148,9 @@ impl Quote {
                     amount.token_id,
                     min_base_amount..=max_base_amount,
                     amount.value,
+                    SciType::PartialNoFee {
+                        counter_amount: amount,
+                    },
                 )
             }
             _ => {
@@ -142,6 +176,7 @@ impl Quote {
             base_range,
             max_counter_tokens,
             timestamp,
+            sci_type,
         })
     }
 
@@ -185,7 +220,7 @@ impl Quote {
             return Err(Error::UnsupportedSci("Missing input rules".into()));
         };
 
-        let (counter_token_id, base_range, max_counter_tokens) = match (
+        let (counter_token_id, base_range, max_counter_tokens, sci_type) = match (
             input_rules.required_outputs.len(),
             input_rules.partial_fill_outputs.len(),
         ) {
@@ -207,7 +242,7 @@ impl Quote {
 
                 // One should be the fee output and one should be the output that pays back the
                 // SCI creator
-                let (payback_index, fee_index) = if input_rules.required_outputs[0]
+                let (counter_index, fee_index) = if input_rules.required_outputs[0]
                     .view_key_match(fee_view_private_key)
                     .is_ok()
                 {
@@ -224,7 +259,7 @@ impl Quote {
                 };
 
                 // TODO do we want to round up?
-                let required_fee_amount = ((sci.required_output_amounts[payback_index].value
+                let required_fee_amount = ((sci.required_output_amounts[counter_index].value
                     as u128)
                     * (required_fee_basis_points as u128)
                     / 10000u128) as u64;
@@ -236,9 +271,13 @@ impl Quote {
                 }
 
                 (
-                    TokenId::from(sci.required_output_amounts[payback_index].token_id),
+                    TokenId::from(sci.required_output_amounts[counter_index].token_id),
                     sci.pseudo_output_amount.value..=sci.pseudo_output_amount.value,
-                    sci.required_output_amounts[payback_index].value,
+                    sci.required_output_amounts[counter_index].value,
+                    SciType::NonPartialPercentageFee {
+                        counter_amount: sci.required_output_amounts[counter_index],
+                        fee_amount: sci.required_output_amounts[fee_index],
+                    },
                 )
             }
 
@@ -268,7 +307,7 @@ impl Quote {
                 }
                 let partial_amounts = [partial_amount0, partial_amount1];
 
-                let (payback_index, fee_index) = if input_rules.partial_fill_outputs[0]
+                let (counter_index, fee_index) = if input_rules.partial_fill_outputs[0]
                     .tx_out
                     .view_key_match(fee_view_private_key)
                     .is_ok()
@@ -286,11 +325,11 @@ impl Quote {
                     ));
                 };
 
-                let payback_amount = partial_amounts[payback_index];
+                let counter_amount = partial_amounts[counter_index];
                 let fee_amount = partial_amounts[fee_index];
 
                 // TODO do we want to round up?
-                let required_fee_amount = ((payback_amount.value as u128)
+                let required_fee_amount = ((counter_amount.value as u128)
                     * (required_fee_basis_points as u128)
                     / 10000u128) as u64;
                 if required_fee_amount > fee_amount.value {
@@ -326,9 +365,13 @@ impl Quote {
                 }
 
                 (
-                    payback_amount.token_id,
+                    counter_amount.token_id,
                     min_base_amount..=max_base_amount,
-                    payback_amount.value,
+                    counter_amount.value,
+                    SciType::PartialPercentageFee {
+                        counter_amount: counter_amount,
+                        fee_amount,
+                    },
                 )
             }
             _ => {
@@ -354,6 +397,7 @@ impl Quote {
             base_range,
             max_counter_tokens,
             timestamp,
+            sci_type,
         })
     }
 
@@ -365,6 +409,7 @@ impl Quote {
         base_range: RangeInclusive<u64>,
         max_counter_tokens: u64,
         timestamp: u64,
+        sci_type: SciType,
     ) -> Self {
         Self {
             sci,
@@ -373,6 +418,7 @@ impl Quote {
             base_range,
             max_counter_tokens,
             timestamp,
+            sci_type,
         }
     }
 
@@ -735,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn test_max_tokens() {
+    fn test_max_tokens_without_fee() {
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
 
         // Test max tokens for the non-partial-fill scenario
@@ -828,7 +874,34 @@ mod tests {
     }
 
     #[test]
-    fn counter_tokens_cost_works_for_non_partial_fill_scis() {
+    fn counter_tokens_cost_works_for_non_partial_fill_scis_with_fee() {
+        let pair = pair();
+        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
+
+        // Creating a quote should work
+        let sci = create_sci_with_fee_payout(
+            &pair,
+            1000,
+            2000,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote =
+            Quote::new_with_fee_payout(sci, None, fee_account.view_private_key(), 100).unwrap();
+
+        // We can only calculate cost for the exact amount of base tokens since this is
+        // not a partial fill.
+        assert_eq!(quote.counter_tokens_cost(1000), Ok(2000));
+        assert!(quote.counter_tokens_cost(999).is_err());
+        assert!(quote.counter_tokens_cost(1001).is_err());
+        assert!(quote.counter_tokens_cost(0).is_err());
+        assert!(quote.counter_tokens_cost(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn counter_tokens_cost_works_for_non_partial_fill_scis_without_fee() {
         let pair = pair();
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
 
