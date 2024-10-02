@@ -1,6 +1,7 @@
 // Copyright (c) 2023 MobileCoin Inc.
 
 use crate::{Error, Pair, QuoteId};
+use mc_crypto_keys::RistrettoPrivate;
 use mc_transaction_extra::SignedContingentInput;
 use mc_transaction_types::TokenId;
 use serde::{Deserialize, Serialize};
@@ -43,8 +44,17 @@ impl Quote {
     /// * `sci` - The SCI to add.
     /// * `timestamp` - The timestamp of the block containing the SCI. If not
     ///   provided, the system time is used.
+    /// * `fee_view_private_key` - The view private key of the DEQS fee address.
+    ///   Used to identify which of the outputs pays out the fees
+    /// * `required_fee_basis_points` - How many basis points of fees are we
+    ///   requiring. The fee is paid in the counter asset.
     #[allow(clippy::result_large_err)]
-    pub fn new(sci: SignedContingentInput, timestamp: Option<u64>) -> Result<Self, Error> {
+    pub fn new(
+        sci: SignedContingentInput,
+        timestamp: Option<u64>,
+        fee_view_private_key: &RistrettoPrivate,
+        required_fee_basis_points: u16,
+    ) -> Result<Self, Error> {
         let timestamp = if let Some(timestamp) = timestamp {
             timestamp
         } else {
@@ -62,9 +72,6 @@ impl Quote {
         // fulfiller will provide.
         let base_token_id = TokenId::from(sci.pseudo_output_amount.token_id);
 
-        // TODO: This is making strong assumptions about the structure of the SCI and
-        // doesn't currently take into account the scenario where we would also
-        // want a fee output to pay the DEQS.
         let input_rules = if let Some(input_rules) = sci.tx_in.input_rules.as_ref() {
             input_rules
         } else {
@@ -75,18 +82,112 @@ impl Quote {
             input_rules.required_outputs.len(),
             input_rules.partial_fill_outputs.len(),
         ) {
-            (0, 0) => return Err(Error::UnsupportedSci("No required/partial outputs".into())),
-            (1, 0) => {
+            // Two required non-partial output.
+            (2, 0) => {
+                if sci.required_output_amounts[0].token_id
+                    != sci.required_output_amounts[1].token_id
+                {
+                    return Err(Error::UnsupportedSci(
+                        "Both required non-partial outputs should be the same token id".into(),
+                    ));
+                }
+
+                // One should be the fee output and one should be the output that pays back the
+                // SCI creator
+                let (fee_index, counter_index) = if input_rules.required_outputs[0]
+                    .view_key_match(fee_view_private_key)
+                    .is_ok()
+                {
+                    (0, 1)
+                } else if input_rules.required_outputs[1]
+                    .view_key_match(fee_view_private_key)
+                    .is_ok()
+                {
+                    (1, 0)
+                } else {
+                    return Err(Error::UnsupportedSci(
+                        "Neither of the required outputs pays the fee address".into(),
+                    ));
+                };
+
+                // TODO do we want to round up?
+                let required_fee_amount = ((sci.required_output_amounts[counter_index].value
+                    as u128)
+                    * (required_fee_basis_points as u128)
+                    / 10000u128) as u64;
+                if required_fee_amount > sci.required_output_amounts[fee_index].value {
+                    return Err(Error::UnsupportedSci(format!(
+                        "Expected a required fee output of at least {required_fee_amount}, got {}",
+                        sci.required_output_amounts[fee_index].value
+                    )));
+                }
+
                 // Single required non-partial output
                 (
-                    TokenId::from(sci.required_output_amounts[0].token_id),
+                    TokenId::from(sci.required_output_amounts[counter_index].token_id),
                     sci.pseudo_output_amount.value..=sci.pseudo_output_amount.value,
-                    sci.required_output_amounts[0].value,
+                    sci.required_output_amounts[counter_index].value,
                 )
             }
-            (num_required_outputs @ (0 | 1), 1) => {
-                // Single partial output or a single partial output + suspected change output
-                let (amount, _) = input_rules.partial_fill_outputs[0].reveal_amount()?;
+
+            // Two partial outputs or two partial outputs + required change output
+            // One of the partial outputs is to pay the provider of the SCI, the other is to
+            // pay the fee.
+            (num_required_outputs @ (0 | 1), 2) => {
+                let (partial_amount0, _) = input_rules.partial_fill_outputs[0]
+                    .reveal_amount()
+                    .map_err(|err| {
+                        Error::UnsupportedSci(format!(
+                            "Failed revealing partial output #0 amount: {err}"
+                        ))
+                    })?;
+                let (partial_amount1, _) = input_rules.partial_fill_outputs[1]
+                    .reveal_amount()
+                    .map_err(|err| {
+                        Error::UnsupportedSci(format!(
+                            "Failed revealing partial output #1 amount: {err}"
+                        ))
+                    })?;
+
+                if partial_amount0.token_id != partial_amount1.token_id {
+                    return Err(Error::UnsupportedSci(
+                        "Both required partial outputs should be the same token id".into(),
+                    ));
+                }
+                let partial_amounts = [partial_amount0, partial_amount1];
+
+                let (fee_index, counter_index) = if input_rules.partial_fill_outputs[0]
+                    .tx_out
+                    .view_key_match(fee_view_private_key)
+                    .is_ok()
+                {
+                    (0, 1)
+                } else if input_rules.partial_fill_outputs[1]
+                    .tx_out
+                    .view_key_match(fee_view_private_key)
+                    .is_ok()
+                {
+                    (1, 0)
+                } else {
+                    return Err(Error::UnsupportedSci(
+                        "Neither of the partial fill outputs pays the fee address".into(),
+                    ));
+                };
+
+                let counter_amount = partial_amounts[counter_index];
+                let fee_amount = partial_amounts[fee_index];
+
+                // TODO do we want to round up?
+                let required_fee_amount = ((counter_amount.value as u128)
+                    * (required_fee_basis_points as u128)
+                    / 10000u128) as u64;
+                if required_fee_amount > fee_amount.value {
+                    return Err(Error::UnsupportedSci(format!(
+                        "Expected a required fee output of at least {required_fee_amount}, got {}",
+                        fee_amount.value
+                    )));
+                }
+
                 let min_base_amount = input_rules.min_partial_fill_value;
                 let mut max_base_amount = sci.pseudo_output_amount.value;
 
@@ -98,8 +199,8 @@ impl Quote {
                 if num_required_outputs == 1 {
                     if sci.required_output_amounts[0].token_id != base_token_id {
                         return Err(Error::UnsupportedSci(format!(
-                        "Suspected required-change-output token id {} does not match partial output token id {}",
-                        sci.required_output_amounts[0].token_id, amount.token_id
+                        "Suspected required-change-output token id {} does not match base token id {}",
+                        sci.required_output_amounts[0].token_id, base_token_id
                     )));
                     }
                     max_base_amount = max_base_amount
@@ -113,9 +214,9 @@ impl Quote {
                 }
 
                 (
-                    amount.token_id,
+                    counter_amount.token_id,
                     min_base_amount..=max_base_amount,
-                    amount.value,
+                    counter_amount.value,
                 )
             }
             _ => {
@@ -210,9 +311,6 @@ impl Quote {
             return Err(Error::InsufficientBaseTokens(base_tokens));
         }
 
-        // TODO: This is making strong assumptions about the structure of the SCI and
-        // doesn't currently take into account the scenario where we would also
-        // want a fee output to pay the DEQS.
         let input_rules = if let Some(input_rules) = self.sci.tx_in.input_rules.as_ref() {
             input_rules
         } else {
@@ -223,25 +321,22 @@ impl Quote {
             input_rules.required_outputs.len(),
             input_rules.partial_fill_outputs.len(),
         ) {
-            (0, 0) => Err(Error::UnsupportedSci("No required/partial outputs".into())),
-
-            (1, 0) => {
-                // Single required non-partial output. This quote can only execute if are taking
-                // the entire amount.
+            // Two required non-partial output.
+            // This implies a non-partial quote.
+            (2, 0) => {
+                // This quote can only execute if are taking the entire amount.
                 // The assert here makes sense since we should only get here if base_tokens is a
                 // range containing only self.sci.pseudo_output_amount.value
                 assert!(base_tokens == self.sci.pseudo_output_amount.value);
 
-                // In a non-partial swap, the fulfiller need to provide the amount specified in
-                // the (only, for now) required output.
-                Ok(self.sci.required_output_amounts[0].value)
+                // In a non-partial swap, the fulfiller need to provide the maximum amount
+                // required.
+                Ok(self.max_counter_tokens)
             }
 
-            (num_required_outputs @ (0 | 1), 1) => {
-                // Single partial output or a single partial output + change amount.
-                // The fact that the required output is treated as change has been verified when
-                // the Quote was created.
-
+            // Two partial outputs or two partial outputs + required change output
+            // This implies a partial fill quote.
+            (num_required_outputs @ (0 | 1), 2) => {
                 // The amount we are taking must be above the minimum fill value. It is expected
                 // to be, since we checked base_range at the beginning.
                 assert!(base_tokens >= input_rules.min_partial_fill_value);
@@ -262,8 +357,7 @@ impl Quote {
                 // Calculate the number of counter tokens we need to return as change to the
                 // offerer of the SCI. It is calculated as a fraction of the partial fill
                 // output.
-                let (amount, _) = input_rules.partial_fill_outputs[0].reveal_amount()?;
-                let num_128 = amount.value as u128 * fill_fraction_num;
+                let num_128 = self.max_counter_tokens as u128 * fill_fraction_num;
                 // Divide and round down
                 Ok((num_128 / fill_fractions_denom) as u64)
             }
@@ -274,14 +368,6 @@ impl Quote {
                 input_rules.partial_fill_outputs.len()
             ))),
         }
-    }
-}
-
-impl TryFrom<SignedContingentInput> for Quote {
-    type Error = Error;
-
-    fn try_from(sci: SignedContingentInput) -> Result<Self, Self::Error> {
-        Self::new(sci, None)
     }
 }
 
@@ -325,6 +411,7 @@ impl PartialOrd for Quote {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mc_transaction_core::{AccountKey, PublicAddress};
     use rand::{prelude::SliceRandom, rngs::StdRng, SeedableRng};
     use rand_core::{CryptoRng, RngCore};
 
@@ -343,6 +430,8 @@ mod tests {
         pair: &Pair,
         base_amount: u64,
         counter_amount: u64,
+        fee_address: &PublicAddress,
+        fee_basis_points: u16,
         rng: &mut (impl RngCore + CryptoRng),
     ) -> SignedContingentInput {
         deqs_mc_test_utils::create_sci(
@@ -350,6 +439,8 @@ mod tests {
             pair.counter_token_id,
             base_amount,
             counter_amount,
+            fee_address,
+            fee_basis_points,
             rng,
             None,
         )
@@ -364,6 +455,8 @@ mod tests {
         min_base_fill_amount: u64,
         required_base_change_amount: u64,
         counter_amount: u64,
+        fee_address: &PublicAddress,
+        fee_basis_points: u16,
         rng: &mut (impl RngCore + CryptoRng),
     ) -> SignedContingentInput {
         deqs_mc_test_utils::create_partial_sci(
@@ -373,6 +466,8 @@ mod tests {
             min_base_fill_amount,
             required_base_change_amount,
             counter_amount,
+            fee_address,
+            fee_basis_points,
             rng,
             None,
         )
@@ -381,38 +476,82 @@ mod tests {
     #[test]
     fn test_max_tokens() {
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
 
         // Test max tokens for the non-partial-fill scenario
-        let sci = create_sci(&pair(), 10, 20, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
+        let sci = create_sci(
+            &pair(),
+            10,
+            20,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
 
         assert_eq!(quote.max_base_tokens(), 10);
         assert_eq!(quote.max_counter_tokens(), 20);
 
         // Test max tokens for a partial fill with no change and no minimum.
-        let sci = create_partial_sci(&pair(), 10, 0, 0, 100, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
+        let sci = create_partial_sci(
+            &pair(),
+            10,
+            0,
+            0,
+            100,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
 
         assert_eq!(quote.max_base_tokens(), 10);
         assert_eq!(quote.max_counter_tokens(), 100);
 
         // Test max tokens for a partial fill with no change and a minimum.
-        let sci = create_partial_sci(&pair(), 10, 7, 0, 100, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
+        let sci = create_partial_sci(
+            &pair(),
+            10,
+            7,
+            0,
+            100,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
 
         assert_eq!(quote.max_base_tokens(), 10);
         assert_eq!(quote.max_counter_tokens(), 100);
 
         // Test max tokens for a partial fill with change and no minimum.
-        let sci = create_partial_sci(&pair(), 10, 0, 5, 100, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
+        let sci = create_partial_sci(
+            &pair(),
+            10,
+            0,
+            5,
+            100,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
 
         assert_eq!(quote.max_base_tokens(), 5);
         assert_eq!(quote.max_counter_tokens(), 100);
 
         // Test max tokens for a partial fill with change and a minimum.
-        let sci = create_partial_sci(&pair(), 10, 3, 5, 100, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
+        let sci = create_partial_sci(
+            &pair(),
+            10,
+            3,
+            5,
+            100,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
 
         assert_eq!(quote.max_base_tokens(), 5);
         assert_eq!(quote.max_counter_tokens(), 100);
@@ -421,16 +560,134 @@ mod tests {
     #[test]
     fn test_sorting() {
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
 
-        let quote_1_for_10 = Quote::try_from(create_sci(&pair(), 1, 10, &mut rng)).unwrap();
-        let quote_2_for_10 = Quote::try_from(create_sci(&pair(), 2, 10, &mut rng)).unwrap();
-        let quote_3_for_10 = Quote::try_from(create_sci(&pair(), 3, 10, &mut rng)).unwrap();
-        let quote_1_for_5 = Quote::try_from(create_sci(&pair(), 1, 5, &mut rng)).unwrap();
-        let quote_2_for_5 = Quote::try_from(create_sci(&pair(), 2, 5, &mut rng)).unwrap();
-        let quote_3_for_5 = Quote::try_from(create_sci(&pair(), 3, 5, &mut rng)).unwrap();
-        let quote_10_for_10 = Quote::try_from(create_sci(&pair(), 10, 10, &mut rng)).unwrap();
-        let quote_20_for_10 = Quote::try_from(create_sci(&pair(), 20, 10, &mut rng)).unwrap();
-        let quote_30_for_10 = Quote::try_from(create_sci(&pair(), 30, 10, &mut rng)).unwrap();
+        let quote_1_for_10 = Quote::new(
+            create_sci(
+                &pair(),
+                1,
+                10,
+                &fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            ),
+            None,
+            fee_account.view_private_key(),
+            100,
+        )
+        .unwrap();
+        let quote_2_for_10 = Quote::new(
+            create_sci(
+                &pair(),
+                2,
+                10,
+                &fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            ),
+            None,
+            fee_account.view_private_key(),
+            100,
+        )
+        .unwrap();
+        let quote_3_for_10 = Quote::new(
+            create_sci(
+                &pair(),
+                3,
+                10,
+                &fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            ),
+            None,
+            fee_account.view_private_key(),
+            100,
+        )
+        .unwrap();
+        let quote_1_for_5 = Quote::new(
+            create_sci(
+                &pair(),
+                1,
+                5,
+                &fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            ),
+            None,
+            fee_account.view_private_key(),
+            100,
+        )
+        .unwrap();
+        let quote_2_for_5 = Quote::new(
+            create_sci(
+                &pair(),
+                2,
+                5,
+                &fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            ),
+            None,
+            fee_account.view_private_key(),
+            100,
+        )
+        .unwrap();
+        let quote_3_for_5 = Quote::new(
+            create_sci(
+                &pair(),
+                3,
+                5,
+                &fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            ),
+            None,
+            fee_account.view_private_key(),
+            100,
+        )
+        .unwrap();
+        let quote_10_for_10 = Quote::new(
+            create_sci(
+                &pair(),
+                10,
+                10,
+                &fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            ),
+            None,
+            fee_account.view_private_key(),
+            100,
+        )
+        .unwrap();
+        let quote_20_for_10 = Quote::new(
+            create_sci(
+                &pair(),
+                20,
+                10,
+                &fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            ),
+            None,
+            fee_account.view_private_key(),
+            100,
+        )
+        .unwrap();
+        let quote_30_for_10 = Quote::new(
+            create_sci(
+                &pair(),
+                30,
+                10,
+                &fee_account.default_subaddress(),
+                100,
+                &mut rng,
+            ),
+            None,
+            fee_account.view_private_key(),
+            100,
+        )
+        .unwrap();
 
         let all_quotes = vec![
             &quote_1_for_10,
@@ -475,16 +732,24 @@ mod tests {
     fn counter_tokens_cost_works_for_non_partial_fill_scis() {
         let pair = pair();
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
 
         // Adding an quote should work
-        let sci = create_sci(&pair, 10, 20, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
+        let sci = create_sci(
+            &pair,
+            100,
+            200,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
 
         // We can only calculate cost for the exact amount of base tokens since this is
         // not a partial fill.
-        assert_eq!(quote.counter_tokens_cost(10), Ok(20));
-        assert!(quote.counter_tokens_cost(9).is_err());
-        assert!(quote.counter_tokens_cost(11).is_err());
+        assert_eq!(quote.counter_tokens_cost(100), Ok(200));
+        assert!(quote.counter_tokens_cost(99).is_err());
+        assert!(quote.counter_tokens_cost(101).is_err());
         assert!(quote.counter_tokens_cost(0).is_err());
         assert!(quote.counter_tokens_cost(u64::MAX).is_err());
     }
@@ -493,10 +758,20 @@ mod tests {
     fn counter_tokens_cost_works_for_partial_fill_no_change_no_min() {
         let pair = pair();
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
 
         // Trading at a ratio of 1 base token to 10 counter tokens
-        let sci = create_partial_sci(&pair, 10, 0, 0, 100, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
+        let sci = create_partial_sci(
+            &pair,
+            10,
+            0,
+            0,
+            100,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
         assert_eq!(quote.counter_tokens_cost(10), Ok(100));
         assert_eq!(quote.counter_tokens_cost(5), Ok(50));
         assert_eq!(quote.counter_tokens_cost(0), Ok(0));
@@ -505,17 +780,26 @@ mod tests {
         assert!(quote.counter_tokens_cost(u64::MAX).is_err());
 
         // Trading at a ratio of 10 base token to 1 counter tokens
-        let sci = create_partial_sci(&pair, 100, 0, 0, 10, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
-        assert_eq!(quote.counter_tokens_cost(100), Ok(10));
-        assert_eq!(quote.counter_tokens_cost(50), Ok(5));
-        assert_eq!(quote.counter_tokens_cost(51), Ok(5));
-        assert_eq!(quote.counter_tokens_cost(59), Ok(5));
-        assert_eq!(quote.counter_tokens_cost(60), Ok(6));
-        assert_eq!(quote.counter_tokens_cost(1), Ok(0)); // rounding down, 1 token is not enough to get any counter tokens
+        let sci = create_partial_sci(
+            &pair,
+            1000,
+            0,
+            0,
+            100,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
+        assert_eq!(quote.counter_tokens_cost(1000), Ok(100));
+        assert_eq!(quote.counter_tokens_cost(500), Ok(50));
+        assert_eq!(quote.counter_tokens_cost(501), Ok(50));
+        assert_eq!(quote.counter_tokens_cost(509), Ok(50));
+        assert_eq!(quote.counter_tokens_cost(510), Ok(51));
+        assert_eq!(quote.counter_tokens_cost(9), Ok(0)); // rounding down, 9 tokens are not enough to get any counter tokens
         assert_eq!(quote.counter_tokens_cost(0), Ok(0));
 
-        assert!(quote.counter_tokens_cost(101).is_err());
+        assert!(quote.counter_tokens_cost(1001).is_err());
         assert!(quote.counter_tokens_cost(u64::MAX).is_err());
     }
 
@@ -523,30 +807,49 @@ mod tests {
     fn counter_tokens_cost_works_for_partial_fill_no_change_with_min() {
         let pair = pair();
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
 
         // Trading at a ratio of 1 base token to 10 counter tokens
-        let sci = create_partial_sci(&pair, 10, 7, 0, 100, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
-        assert_eq!(quote.counter_tokens_cost(10), Ok(100));
-        assert_eq!(quote.counter_tokens_cost(7), Ok(70));
+        let sci = create_partial_sci(
+            &pair,
+            100,
+            70,
+            0,
+            1000,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
+        assert_eq!(quote.counter_tokens_cost(100), Ok(1000));
+        assert_eq!(quote.counter_tokens_cost(70), Ok(700));
 
-        assert!(quote.counter_tokens_cost(6).is_err()); // below the min fill amount
+        assert!(quote.counter_tokens_cost(69).is_err()); // below the min fill amount
         assert!(quote.counter_tokens_cost(0).is_err()); // below the min fill amount
-        assert!(quote.counter_tokens_cost(11).is_err()); // above the max amount offered
+        assert!(quote.counter_tokens_cost(101).is_err()); // above the max amount offered
         assert!(quote.counter_tokens_cost(u64::MAX).is_err()); // above the max amount offered
 
         // Trading at a ratio of 10 base token to 1 counter tokens
-        let sci = create_partial_sci(&pair, 100, 55, 0, 10, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
-        assert_eq!(quote.counter_tokens_cost(100), Ok(10));
-        assert_eq!(quote.counter_tokens_cost(55), Ok(5)); // rounding down
-        assert_eq!(quote.counter_tokens_cost(59), Ok(5)); // rounding down
-        assert_eq!(quote.counter_tokens_cost(60), Ok(6));
+        let sci = create_partial_sci(
+            &pair,
+            1000,
+            550,
+            0,
+            100,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
+        assert_eq!(quote.counter_tokens_cost(1000), Ok(100));
+        assert_eq!(quote.counter_tokens_cost(551), Ok(55)); // rounding down
+        assert_eq!(quote.counter_tokens_cost(599), Ok(59)); // rounding down
+        assert_eq!(quote.counter_tokens_cost(600), Ok(60));
 
         assert!(quote.counter_tokens_cost(0).is_err()); // below the min fill amount
         assert!(quote.counter_tokens_cost(1).is_err()); // below the min fill amount
-        assert!(quote.counter_tokens_cost(54).is_err()); // below the min fill amount
-        assert!(quote.counter_tokens_cost(101).is_err()); // above the max amount offered
+        assert!(quote.counter_tokens_cost(549).is_err()); // below the min fill amount
+        assert!(quote.counter_tokens_cost(1001).is_err()); // above the max amount offered
         assert!(quote.counter_tokens_cost(u64::MAX).is_err()); // above the max
                                                                // amount offered
     }
@@ -555,10 +858,20 @@ mod tests {
     fn counter_tokens_cost_works_for_partial_fill_with_change_no_min() {
         let pair = pair();
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
 
         // Trading at a ratio of 1 base token to 10 counter tokens
-        let sci = create_partial_sci(&pair, 10, 0, 3, 100, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
+        let sci = create_partial_sci(
+            &pair,
+            10,
+            0,
+            3,
+            100,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
         assert_eq!(quote.counter_tokens_cost(7), Ok(70));
         assert_eq!(quote.counter_tokens_cost(6), Ok(60));
         assert_eq!(quote.counter_tokens_cost(1), Ok(10));
@@ -568,18 +881,27 @@ mod tests {
         assert!(quote.counter_tokens_cost(u64::MAX).is_err());
 
         // Trading at a ratio of 10 base token to 1 counter tokens
-        let sci = create_partial_sci(&pair, 100, 0, 30, 10, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
-        assert_eq!(quote.counter_tokens_cost(70), Ok(7));
-        assert_eq!(quote.counter_tokens_cost(60), Ok(6));
-        assert_eq!(quote.counter_tokens_cost(61), Ok(6));
-        assert_eq!(quote.counter_tokens_cost(69), Ok(6));
-        assert_eq!(quote.counter_tokens_cost(1), Ok(0)); // rounding down, 1 token is not enough to get any counter tokens
+        let sci = create_partial_sci(
+            &pair,
+            1000,
+            0,
+            300,
+            100,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
+        assert_eq!(quote.counter_tokens_cost(700), Ok(70));
+        assert_eq!(quote.counter_tokens_cost(600), Ok(60));
+        assert_eq!(quote.counter_tokens_cost(601), Ok(60));
+        assert_eq!(quote.counter_tokens_cost(609), Ok(60));
+        assert_eq!(quote.counter_tokens_cost(9), Ok(0)); // rounding down, 9 tokens are not enough to get any counter tokens
         assert_eq!(quote.counter_tokens_cost(0), Ok(0));
 
-        assert!(quote.counter_tokens_cost(71).is_err()); // exceeds max available (since we require a change of 30 this allows for up to
-                                                         // 70 to be swapped)
-        assert!(quote.counter_tokens_cost(101).is_err()); // exceeds max available
+        assert!(quote.counter_tokens_cost(701).is_err()); // exceeds max available (since we require a change of 300 this allows for up to
+                                                          // 700 to be swapped)
+        assert!(quote.counter_tokens_cost(1001).is_err()); // exceeds max available
         assert!(quote.counter_tokens_cost(u64::MAX).is_err());
     }
 
@@ -587,12 +909,22 @@ mod tests {
     fn counter_tokens_cost_works_for_partial_fill_with_change_and_min() {
         let pair = pair();
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
 
         // Trading at a ratio of 1 base token to 10 counter tokens
         // Allowing a trade of between 5 and 7 tokens (since min_base_fill_amount is 5
         // and required change is 3, leaving 7)
-        let sci = create_partial_sci(&pair, 10, 5, 3, 100, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
+        let sci = create_partial_sci(
+            &pair,
+            10,
+            5,
+            3,
+            100,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
         assert_eq!(quote.counter_tokens_cost(7), Ok(70));
         assert_eq!(quote.counter_tokens_cost(6), Ok(60));
         assert_eq!(quote.counter_tokens_cost(5), Ok(50));
@@ -604,15 +936,24 @@ mod tests {
         // Trading at a ratio of 10 base token to 1 counter tokens
         // Allowing a trade between 50 and 70 tokens (since min_base_fill_amount is 50,
         // and required change is 30, leaving up to 70)
-        let sci = create_partial_sci(&pair, 100, 50, 30, 10, &mut rng);
-        let quote = Quote::try_from(sci).unwrap();
-        assert_eq!(quote.counter_tokens_cost(70), Ok(7));
-        assert_eq!(quote.counter_tokens_cost(50), Ok(5));
-        assert_eq!(quote.counter_tokens_cost(51), Ok(5));
-        assert_eq!(quote.counter_tokens_cost(59), Ok(5));
-        assert!(quote.counter_tokens_cost(71).is_err()); // exceeds max available (since we require a change of 30 this allows for up to
-                                                         // 70 to be swapped)
-        assert!(quote.counter_tokens_cost(101).is_err()); // exceeds max available
+        let sci = create_partial_sci(
+            &pair,
+            1000,
+            50,
+            300,
+            100,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+        );
+        let quote = Quote::new(sci, None, fee_account.view_private_key(), 100).unwrap();
+        assert_eq!(quote.counter_tokens_cost(700), Ok(70));
+        assert_eq!(quote.counter_tokens_cost(500), Ok(50));
+        assert_eq!(quote.counter_tokens_cost(501), Ok(50));
+        assert_eq!(quote.counter_tokens_cost(509), Ok(50));
+        assert!(quote.counter_tokens_cost(701).is_err()); // exceeds max available (since we require a change of 300 this allows for up to
+                                                          // 700 to be swapped)
+        assert!(quote.counter_tokens_cost(1001).is_err()); // exceeds max available
         assert!(quote.counter_tokens_cost(u64::MAX).is_err());
         assert!(quote.counter_tokens_cost(49).is_err()); // below min_partial_fill_value
         assert!(quote.counter_tokens_cost(1).is_err()); // below min_partial_fill_value
