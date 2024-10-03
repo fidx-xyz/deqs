@@ -1,10 +1,11 @@
 // Copyright (c) 2023 MobileCoin Inc.
 
-use deqs_api::deqs::{Quote, QuoteStatusCode, SubmitQuotesResponse};
+use deqs_api::deqs::{GetConfigResponse, Quote, QuoteStatusCode, SubmitQuotesResponse};
 use deqs_liquidity_bot::{
     mini_wallet::{MatchedTxOut, WalletEvent},
     LiquidityBot,
 };
+use deqs_quote_book_api::FeeConfig;
 use deqs_test_server::DeqsTestServer;
 use mc_account_keys::AccountKey;
 use mc_blockchain_types::BlockVersion;
@@ -29,6 +30,13 @@ use tokio_retry::{strategy::FixedInterval, Retry};
 async fn test_basic_submission(logger: Logger) {
     let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
     let account_key = AccountKey::random(&mut rng);
+    let fee_account = AccountKey::random(&mut rng);
+
+    let fee_config = FeeConfig {
+        fee_address: fee_account.default_subaddress(),
+        fee_basis_points: 20,
+        fee_view_private_key: *fee_account.view_private_key(),
+    };
 
     let block_version = BlockVersion::MAX;
     let mut ledger = create_ledger();
@@ -39,6 +47,11 @@ async fn test_basic_submission(logger: Logger) {
     let deqs_server = DeqsTestServer::start(logger.clone());
     let token_id = TokenId::from(5);
     let swap_rate = dec!(5);
+
+    let mut config_response = GetConfigResponse::default();
+    config_response.set_fee_address((&fee_config.fee_address).into());
+    config_response.set_fee_basis_points(fee_config.fee_basis_points as u32);
+    deqs_server.set_config_response(Ok(config_response));
 
     let liquidity_bot = LiquidityBot::new(
         account_key.clone(),
@@ -126,14 +139,26 @@ async fn test_basic_submission(logger: Logger) {
     let sci = SignedContingentInput::try_from(&req.quotes[0]).unwrap();
     assert!(sci.tx_in.ring.contains(&matched_tx_out.tx_out));
 
-    // The SCI should have a partial fill output targetted at the correct account,
-    // with the correct amount.
+    // The SCI should have two partial fill outputs targetted at the correct
+    // accounts, with the correct amounts (one that pays us back and one that
+    // pays the DEQS fee) TODO test that the output goes to the correct account.
     let input_rules = sci.tx_in.input_rules.as_ref().unwrap();
-    assert_eq!(input_rules.partial_fill_outputs.len(), 1);
-    let (partial_fill_amount, _) = input_rules.partial_fill_outputs[0].reveal_amount().unwrap();
-    assert_eq!(partial_fill_amount.token_id, TokenId::MOB);
-    assert_eq!(
-        Decimal::from(partial_fill_amount.value),
-        Decimal::from(amount.value) * swap_rate
-    );
+    assert_eq!(input_rules.partial_fill_outputs.len(), 2);
+
+    let (amount0, _) = input_rules.partial_fill_outputs[0].reveal_amount().unwrap();
+    let (amount1, _) = input_rules.partial_fill_outputs[1].reveal_amount().unwrap();
+
+    assert_eq!(amount0.token_id, TokenId::MOB);
+    assert_eq!(amount1.token_id, TokenId::MOB);
+
+    let mut amounts = [Decimal::from(amount0.value), Decimal::from(amount1.value)];
+    amounts.sort();
+
+    let expected_fill_amount = Decimal::from(amount.value) * swap_rate;
+
+    let expected_fee_amount = (expected_fill_amount
+        * Decimal::new(fee_config.fee_basis_points as i64, 4))
+    .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToPositiveInfinity);
+
+    assert_eq!(amounts, [expected_fee_amount, expected_fill_amount]);
 }

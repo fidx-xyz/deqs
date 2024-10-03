@@ -372,20 +372,30 @@ impl LiquidityBotTask {
             let num_partial_fill_outputs = partial_fill_outputs
                 .map(|partial_fill_outputs| partial_fill_outputs.len())
                 .unwrap_or(0);
-            if num_partial_fill_outputs != 1 {
+            if num_partial_fill_outputs != 2 {
                 // At the moment, `create_pending_tx_out`, which generates the SCI, always
-                // creates SCIs with a single partial fill output.
-                log::warn!(self.logger, "Somehow ended up with a spent listed TxOut {} without exactly one partial fill output.", listed_tx_out.matched_tx_out.tx_out.public_key);
+                // creates SCIs with a two partial fill outputs.
+                log::warn!(self.logger, "Somehow ended up with a spent listed TxOut {} without exactly two partial fill outputs.", listed_tx_out.matched_tx_out.tx_out.public_key);
                 continue;
             }
 
-            let partial_fill_output = &partial_fill_outputs.unwrap()[0];
-
-            // See if the partial fill output is included in this block, if it is then it
-            // implies the SCI was consumed.
-            let received_counter_output = received_tx_outs
+            // See if the partial output that paid us was included in the block.
+            // The SCI is known to have two partial outputs, one pays us back and one pays
+            // the DEQS fees. We don't care if the DEQS fee partial output made
+            // it into the block, our assumption here that an SCI was consumed if:
+            // 1. The TxOut provided by the SCI appeared in the block
+            // 2. One of the partial tx outs in the SCI has paid our wallet in the same back
+            let partial_fill_output_and_received_counter_output = partial_fill_outputs
+                .expect("can't be empty since we checked the length above")
                 .iter()
-                .find(|mtxo| mtxo.tx_out.public_key == partial_fill_output.tx_out.public_key);
+                .find_map(|partial_fill_output| {
+                    let received_counter_output = received_tx_outs.iter().find(|mtxo| {
+                        mtxo.tx_out.public_key == partial_fill_output.tx_out.public_key
+                    });
+                    received_counter_output.map(|received_counter_output| {
+                        (partial_fill_output, received_counter_output.clone())
+                    })
+                });
 
             // There might be a change output holding whatever wasn't consumed from the
             // input the SCI was offering. This will happen for partial SCIs.
@@ -411,8 +421,8 @@ impl LiquidityBotTask {
                 );
             }
 
-            match received_counter_output.cloned() {
-                Some(received_counter_output) => {
+            match partial_fill_output_and_received_counter_output {
+                Some((partial_fill_output, received_counter_output)) => {
                     let fulfilled_sci = FulfilledSci {
                         requested_counter_output: partial_fill_output.clone(),
                         listed_tx_out: listed_tx_out.clone(),
@@ -1114,7 +1124,7 @@ mod tests {
         assert_eq!(test_ctx.task.pending_tx_outs.len(), 0);
 
         // This test requires that we have cached the deqs server config
-        let _ = test_ctx.task.update_deqs_config().await;
+        test_ctx.task.update_deqs_config().await.unwrap();
 
         // Create four MatchedTxOuts, two for each pair the bot is offering and two
         // unrelated ones.
@@ -1187,6 +1197,9 @@ mod tests {
     #[async_test_with_logger]
     async fn submit_pending_tx_outs_behaves_correctly(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
+
+        // This test requires that we have cached the deqs server config
+        test_ctx.task.update_deqs_config().await.unwrap();
 
         let matched_tx_outs = vec![
             test_ctx.create_matched_tx_out(Amount::new(100, TokenId::MOB)),
@@ -1293,6 +1306,9 @@ mod tests {
     async fn update_pending_tx_outs_from_received_tx_outs_ignores_duplicates(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
 
+        // This test requires that we have cached the deqs server config
+        test_ctx.task.update_deqs_config().await.unwrap();
+
         // Note that while they have the same value, they are different TxOuts so not
         // considered duplicates.
         let matched_tx_outs = vec![
@@ -1363,6 +1379,9 @@ mod tests {
     #[async_test_with_logger]
     async fn resubmit_listed_tx_outs_behaves_correctly(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
+
+        // This test requires that we have cached the deqs server config
+        test_ctx.task.update_deqs_config().await.unwrap();
 
         let mtxo1 = test_ctx.create_matched_tx_out(Amount::new(100, TokenId::MOB));
         let mtxo2 = test_ctx.create_matched_tx_out(Amount::new(100, TokenId::MOB));
@@ -1535,6 +1554,9 @@ mod tests {
     async fn create_pending_tx_out_errors_on_unconfigured_token(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
 
+        // This test requires that we have cached the deqs server config
+        test_ctx.task.update_deqs_config().await.unwrap();
+
         let token_id = TokenId::from(123);
         let mtxo = test_ctx.create_matched_tx_out(Amount::new(100, token_id));
         assert_matches!(
@@ -1546,6 +1568,9 @@ mod tests {
     #[async_test_with_logger]
     async fn create_pending_tx_out_calculates_correct_swap_rate(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
+
+        // This test requires that we have cached the deqs server config
+        test_ctx.task.update_deqs_config().await.unwrap();
 
         // MOB -> eUSD (token id 1) ratio is 2:1 (see default_pairs())
         for (mob_amount, expected_eusd_amount) in [
@@ -1559,7 +1584,7 @@ mod tests {
             let mtxo = test_ctx.create_matched_tx_out(Amount::new(mob_amount, TokenId::MOB));
             let ptxo = test_ctx.task.create_pending_tx_out(mtxo).unwrap();
 
-            let (amount, _) = ptxo
+            let (amount0, _) = ptxo
                 .sci
                 .tx_in
                 .input_rules
@@ -1568,7 +1593,31 @@ mod tests {
                 .partial_fill_outputs[0]
                 .reveal_amount()
                 .unwrap();
-            assert_eq!(amount, Amount::new(expected_eusd_amount, TokenId::from(1)));
+
+            let (amount1, _) = ptxo
+                .sci
+                .tx_in
+                .input_rules
+                .as_ref()
+                .unwrap()
+                .partial_fill_outputs[1]
+                .reveal_amount()
+                .unwrap();
+
+            assert_eq!(amount0.token_id, TokenId::from(1));
+            assert_eq!(amount1.token_id, TokenId::from(1));
+
+            // Sort to make this test immune from the order of the outputs in the SCI
+            let mut amounts = [amount0.value, amount1.value];
+            amounts.sort();
+
+            assert_eq!(
+                amounts,
+                [
+                    calc_fee_amount(expected_eusd_amount, test_ctx.fee_config.fee_basis_points),
+                    expected_eusd_amount,
+                ]
+            );
         }
 
         //  eUSD (token id 1) -> MOB ratio is 1:3 (see default_pairs())
@@ -1576,7 +1625,7 @@ mod tests {
             let mtxo = test_ctx.create_matched_tx_out(Amount::new(eusd_amount, TokenId::from(1)));
             let ptxo = test_ctx.task.create_pending_tx_out(mtxo).unwrap();
 
-            let (amount, _) = ptxo
+            let (amount0, _) = ptxo
                 .sci
                 .tx_in
                 .input_rules
@@ -1585,7 +1634,31 @@ mod tests {
                 .partial_fill_outputs[0]
                 .reveal_amount()
                 .unwrap();
-            assert_eq!(amount, Amount::new(expected_mob_amount, TokenId::MOB));
+
+            let (amount1, _) = ptxo
+                .sci
+                .tx_in
+                .input_rules
+                .as_ref()
+                .unwrap()
+                .partial_fill_outputs[1]
+                .reveal_amount()
+                .unwrap();
+
+            assert_eq!(amount0.token_id, TokenId::MOB);
+            assert_eq!(amount1.token_id, TokenId::MOB);
+
+            // Sort to make this test immune from the order of the outputs in the SCI
+            let mut amounts = [amount0.value, amount1.value];
+            amounts.sort();
+
+            assert_eq!(
+                amounts,
+                [
+                    calc_fee_amount(expected_mob_amount, test_ctx.fee_config.fee_basis_points),
+                    expected_mob_amount,
+                ]
+            );
         }
 
         // Try a conversion that overflows u64
@@ -1599,6 +1672,9 @@ mod tests {
     #[async_test_with_logger]
     async fn unlist_spend_tx_outs_behaves_correctly(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
+
+        // This test requires that we have cached the deqs server config
+        test_ctx.task.update_deqs_config().await.unwrap();
 
         // The bot is going to generate an SCI that offers MOB in exchange for eUSD.
         let mob_value_offered = 1000 * MILLIMOB_TO_PICOMOB;
@@ -1653,6 +1729,9 @@ mod tests {
     async fn look_for_fulfilled_scis_identifies_consumed_scis(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
 
+        // This test requires that we have cached the deqs server config
+        test_ctx.task.update_deqs_config().await.unwrap();
+
         // The bot is going to generate an SCI that offers MOB in exchange for eUSD.
         let mob_value_offered = 1000 * MILLIMOB_TO_PICOMOB;
         let mtxo = test_ctx.create_matched_tx_out(Amount::new(mob_value_offered, TokenId::MOB));
@@ -1701,7 +1780,7 @@ mod tests {
         // Try again with a real tx that consumes the SCI.
         // Create a transaction that consumes a quarter of the SCI sending half of that
         // in eUSD (the sci's ratio is 1 mob = 0.5 eusd)
-        // To keep things a bit simpler, we use a fee value of 0
+        // To keep things a bit simpler, we use a network fee value of 0
         let tx = {
             let mut sci = listed_tx_out.quote.sci().clone();
 
@@ -1710,9 +1789,16 @@ mod tests {
 
             let mob_amount_to_consume = mob_value_offered / 4;
 
+            let eusd_amount = mob_amount_to_consume / 2; // based on the 1 mob=0.5eusd ratio
+            let deqs_fee = calc_fee_amount(eusd_amount, test_ctx.fee_config.fee_basis_points);
+
             let input_credentials = get_input_credentials(
                 BlockVersion::MAX,
-                Amount::new(mob_amount_to_consume / 2, TokenId::from(1)),
+                Amount::new(
+                    // TODO
+                    eusd_amount + deqs_fee,
+                    TokenId::from(1),
+                ),
                 &counterparty,
                 &fog_resolver,
                 &mut test_ctx.rng,

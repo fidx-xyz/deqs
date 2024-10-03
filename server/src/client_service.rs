@@ -905,9 +905,9 @@ mod tests {
             pair.counter_token_id,
             10,
             20,
-                    &quote_book.fee_address(),
-                    calc_fee_amount(20, quote_book.fee_basis_points()),
-             &mut rng,
+            &quote_book.fee_address(),
+            calc_fee_amount(20, quote_book.fee_basis_points()),
+            &mut rng,
             None,
         );
         let req = SubmitQuotesRequest {
@@ -970,9 +970,9 @@ mod tests {
             pair.counter_token_id,
             10,
             20,
-                    &quote_book.fee_address(),
-                    calc_fee_amount(20, quote_book.fee_basis_points()),
-             &mut rng,
+            &quote_book.fee_address(),
+            calc_fee_amount(20, quote_book.fee_basis_points()),
+            &mut rng,
             Some(&ledger),
         );
         let key_image = sci.key_image();
@@ -1134,9 +1134,9 @@ mod tests {
             pair1.counter_token_id,
             10,
             20,
-                    &quote_book.fee_address(),
-                    calc_fee_amount(20, quote_book.fee_basis_points()),
-             &mut rng,
+            &quote_book.fee_address(),
+            calc_fee_amount(20, quote_book.fee_basis_points()),
+            &mut rng,
             None,
         );
         let pair1_sci2 = create_sci(
@@ -1144,9 +1144,9 @@ mod tests {
             pair1.counter_token_id,
             10,
             20,
-                    &quote_book.fee_address(),
-                    calc_fee_amount(20, quote_book.fee_basis_points()),
-             &mut rng,
+            &quote_book.fee_address(),
+            calc_fee_amount(20, quote_book.fee_basis_points()),
+            &mut rng,
             None,
         );
         let pair2_sci1 = create_sci(
@@ -1154,9 +1154,9 @@ mod tests {
             pair2.counter_token_id,
             10,
             20,
-                    &quote_book.fee_address(),
-                    calc_fee_amount(20, quote_book.fee_basis_points()),
-             &mut rng,
+            &quote_book.fee_address(),
+            calc_fee_amount(20, quote_book.fee_basis_points()),
+            &mut rng,
             None,
         );
         let pair2_sci2 = create_sci(
@@ -1164,9 +1164,9 @@ mod tests {
             pair2.counter_token_id,
             10,
             20,
-                    &quote_book.fee_address(),
-                    calc_fee_amount(20, quote_book.fee_basis_points()),
-             &mut rng,
+            &quote_book.fee_address(),
+            calc_fee_amount(20, quote_book.fee_basis_points()),
+            &mut rng,
             None,
         );
         let req = SubmitQuotesRequest {
