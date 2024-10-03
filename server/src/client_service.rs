@@ -313,7 +313,7 @@ mod tests {
     use super::*;
     use deqs_api::{deqs::LiveUpdate, deqs_grpc::DeqsClientApiClient, DeqsClientUri};
     use deqs_mc_test_utils::create_sci;
-    use deqs_quote_book_api::Quote;
+    use deqs_quote_book_api::{calc_fee_amount, FeeConfig, Quote};
     use deqs_quote_book_in_memory::InMemoryQuoteBook;
     use deqs_quote_book_synchronized::SynchronizedQuoteBook;
     use futures::{executor::block_on, StreamExt};
@@ -426,6 +426,17 @@ mod tests {
         ledger
     }
 
+    fn create_in_memory_quote_book() -> InMemoryQuoteBook {
+        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
+
+        InMemoryQuoteBook::new(FeeConfig {
+            fee_address: fee_account.default_subaddress(),
+            fee_basis_points: 20,
+            fee_view_private_key: *fee_account.view_private_key(),
+        })
+    }
+
     #[test_with_logger]
     fn submit_quotes_add_quotes(logger: Logger) {
         let pair = Pair {
@@ -433,7 +444,7 @@ mod tests {
             counter_token_id: TokenId::from(2),
         };
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-        let quote_book = InMemoryQuoteBook::default();
+        let quote_book = create_in_memory_quote_book();
         let (client_api, _server, _msg_bus_tx, _msg_bus_rx) =
             create_test_client_and_server(&quote_book, &logger);
 
@@ -444,6 +455,8 @@ mod tests {
                     pair.counter_token_id,
                     10,
                     20,
+                    &quote_book.fee_address(),
+                    calc_fee_amount(20, quote_book.fee_basis_points()),
                     &mut rng,
                     None,
                 )
@@ -490,7 +503,7 @@ mod tests {
             counter_token_id: TokenId::from(2),
         };
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-        let quote_book = InMemoryQuoteBook::default();
+        let quote_book = create_in_memory_quote_book();
         let (client_api, _server, _msg_bus_tx, _msg_bus_rx) =
             create_test_client_and_server(&quote_book, &logger);
 
@@ -502,6 +515,8 @@ mod tests {
                     pair.counter_token_id,
                     10,
                     20,
+                    &quote_book.fee_address(),
+                    calc_fee_amount(20, quote_book.fee_basis_points()),
                     &mut rng,
                     None,
                 )
@@ -549,6 +564,8 @@ mod tests {
                     pair.counter_token_id,
                     10,
                     20,
+                    &quote_book.fee_address(),
+                    calc_fee_amount(20, quote_book.fee_basis_points()),
                     &mut rng,
                     None,
                 )
@@ -572,7 +589,7 @@ mod tests {
             counter_token_id: TokenId::from(2),
         };
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-        let quote_book = InMemoryQuoteBook::default();
+        let quote_book = create_in_memory_quote_book();
         let (client_api, _server, _msg_bus_tx, _msg_bus_rx) =
             create_test_client_and_server(&quote_book, &logger);
 
@@ -584,6 +601,8 @@ mod tests {
                     pair.counter_token_id,
                     1,
                     20,
+                    &quote_book.fee_address(),
+                    calc_fee_amount(20, quote_book.fee_basis_points()),
                     &mut rng,
                     None,
                 )
@@ -614,6 +633,8 @@ mod tests {
                     pair.counter_token_id,
                     10,
                     20,
+                    &quote_book.fee_address(),
+                    calc_fee_amount(20, quote_book.fee_basis_points()),
                     &mut rng,
                     None,
                 )
@@ -641,7 +662,7 @@ mod tests {
             counter_token_id: TokenId::from(2),
         };
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-        let quote_book = InMemoryQuoteBook::default();
+        let quote_book = create_in_memory_quote_book();
         let (client_api, _server, _msg_bus_tx, _msg_bus_rx) =
             create_test_client_and_server(&quote_book, &logger);
 
@@ -650,6 +671,8 @@ mod tests {
             pair.counter_token_id,
             10,
             20,
+            &quote_book.fee_address(),
+            calc_fee_amount(20, quote_book.fee_basis_points()),
             &mut rng,
             None,
         );
@@ -678,7 +701,7 @@ mod tests {
             counter_token_id: TokenId::from(2),
         };
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-        let quote_book = InMemoryQuoteBook::default();
+        let quote_book = create_in_memory_quote_book();
         let (client_api, _server, _msg_bus_tx, _msg_bus_rx) =
             create_test_client_and_server(&quote_book, &logger);
 
@@ -687,6 +710,8 @@ mod tests {
             pair.counter_token_id,
             10,
             20,
+            &quote_book.fee_address(),
+            calc_fee_amount(20, quote_book.fee_basis_points()),
             &mut rng,
             None,
         );
@@ -695,6 +720,8 @@ mod tests {
             pair.counter_token_id,
             10,
             20,
+            &quote_book.fee_address(),
+            calc_fee_amount(20, quote_book.fee_basis_points()),
             &mut rng,
             None,
         );
@@ -703,6 +730,8 @@ mod tests {
             pair.counter_token_id,
             10,
             20,
+            &quote_book.fee_address(),
+            calc_fee_amount(20, quote_book.fee_basis_points()),
             &mut rng,
             None,
         );
@@ -739,14 +768,50 @@ mod tests {
     #[test_with_logger]
     fn get_quotes_filter_correctly(logger: Logger) {
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-        let quote_book = InMemoryQuoteBook::default();
+        let quote_book = create_in_memory_quote_book();
         let (client_api, _server, _msg_bus_tx, _msg_bus_rx) =
             create_test_client_and_server(&quote_book, &logger);
 
-        let sci1 = create_sci(TokenId::from(1), TokenId::from(2), 10, 20, &mut rng, None);
-        let sci2 = create_sci(TokenId::from(1), TokenId::from(2), 10, 50, &mut rng, None);
-        let sci3 = create_sci(TokenId::from(3), TokenId::from(4), 10, 20, &mut rng, None);
-        let sci4 = create_sci(TokenId::from(3), TokenId::from(4), 12, 50, &mut rng, None);
+        let sci1 = create_sci(
+            TokenId::from(1),
+            TokenId::from(2),
+            10,
+            20,
+            &quote_book.fee_address(),
+            calc_fee_amount(20, quote_book.fee_basis_points()),
+            &mut rng,
+            None,
+        );
+        let sci2 = create_sci(
+            TokenId::from(1),
+            TokenId::from(2),
+            10,
+            50,
+            &quote_book.fee_address(),
+            calc_fee_amount(50, quote_book.fee_basis_points()),
+            &mut rng,
+            None,
+        );
+        let sci3 = create_sci(
+            TokenId::from(3),
+            TokenId::from(4),
+            10,
+            20,
+            &quote_book.fee_address(),
+            calc_fee_amount(20, quote_book.fee_basis_points()),
+            &mut rng,
+            None,
+        );
+        let sci4 = create_sci(
+            TokenId::from(3),
+            TokenId::from(4),
+            12,
+            50,
+            &quote_book.fee_address(),
+            calc_fee_amount(50, quote_book.fee_basis_points()),
+            &mut rng,
+            None,
+        );
 
         let scis = [&sci1, &sci2, &sci3, &sci4]
             .into_iter()
@@ -825,7 +890,7 @@ mod tests {
             counter_token_id: TokenId::from(1),
         };
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-        let quote_book = InMemoryQuoteBook::default();
+        let quote_book = create_in_memory_quote_book();
         let (client_api, _server, mut msg_bus_tx, _msg_bus_rx) =
             create_test_client_and_server(&quote_book, &logger);
 
@@ -840,7 +905,9 @@ mod tests {
             pair.counter_token_id,
             10,
             20,
-            &mut rng,
+                    &quote_book.fee_address(),
+                    calc_fee_amount(20, quote_book.fee_basis_points()),
+             &mut rng,
             None,
         );
         let req = SubmitQuotesRequest {
@@ -888,7 +955,7 @@ mod tests {
         // HACK: We aren't using the live updates in this particular test,
         // so we don't need to put a proper remove_quote_callback here.
         let quote_book = SynchronizedQuoteBook::new(
-            InMemoryQuoteBook::default(),
+            create_in_memory_quote_book(),
             ledger.clone(),
             Box::new(|_| {}),
             logger.clone(),
@@ -903,7 +970,9 @@ mod tests {
             pair.counter_token_id,
             10,
             20,
-            &mut rng,
+                    &quote_book.fee_address(),
+                    calc_fee_amount(20, quote_book.fee_basis_points()),
+             &mut rng,
             Some(&ledger),
         );
         let key_image = sci.key_image();
@@ -1007,7 +1076,7 @@ mod tests {
         };
 
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
-        let quote_book = InMemoryQuoteBook::default();
+        let quote_book = create_in_memory_quote_book();
         let (client_api, _server, _msg_bus_tx, _msg_bus_rx) =
             create_test_client_and_server(&quote_book, &logger);
 
@@ -1065,7 +1134,9 @@ mod tests {
             pair1.counter_token_id,
             10,
             20,
-            &mut rng,
+                    &quote_book.fee_address(),
+                    calc_fee_amount(20, quote_book.fee_basis_points()),
+             &mut rng,
             None,
         );
         let pair1_sci2 = create_sci(
@@ -1073,7 +1144,9 @@ mod tests {
             pair1.counter_token_id,
             10,
             20,
-            &mut rng,
+                    &quote_book.fee_address(),
+                    calc_fee_amount(20, quote_book.fee_basis_points()),
+             &mut rng,
             None,
         );
         let pair2_sci1 = create_sci(
@@ -1081,7 +1154,9 @@ mod tests {
             pair2.counter_token_id,
             10,
             20,
-            &mut rng,
+                    &quote_book.fee_address(),
+                    calc_fee_amount(20, quote_book.fee_basis_points()),
+             &mut rng,
             None,
         );
         let pair2_sci2 = create_sci(
@@ -1089,7 +1164,9 @@ mod tests {
             pair2.counter_token_id,
             10,
             20,
-            &mut rng,
+                    &quote_book.fee_address(),
+                    calc_fee_amount(20, quote_book.fee_basis_points()),
+             &mut rng,
             None,
         );
         let req = SubmitQuotesRequest {

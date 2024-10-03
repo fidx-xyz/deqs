@@ -5,7 +5,7 @@ use deqs_api::{
     deqs_grpc::DeqsClientApiClient,
     DeqsClientUri,
 };
-use deqs_quote_book_api::{Pair, Quote, QuoteBook, QuoteId};
+use deqs_quote_book_api::{calc_fee_amount, FeeConfig, Pair, Quote, QuoteBook, QuoteId};
 use deqs_quote_book_in_memory::InMemoryQuoteBook;
 use deqs_quote_book_synchronized::SynchronizedQuoteBook;
 use deqs_server::{Msg, Server};
@@ -43,6 +43,17 @@ fn create_and_initialize_test_ledger() -> LedgerDB {
     ledger
 }
 
+fn test_fee_config() -> FeeConfig {
+    let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+    let fee_account = AccountKey::random(&mut rng);
+
+    FeeConfig {
+        fee_address: fee_account.default_subaddress(),
+        fee_basis_points: 20,
+        fee_view_private_key: *fee_account.view_private_key(),
+    }
+}
+
 // Helper to start a deqs server.
 type TestQuoteBook = SynchronizedQuoteBook<InMemoryQuoteBook, LedgerDB>;
 type TestServer = Server<TestQuoteBook>;
@@ -55,7 +66,8 @@ async fn start_deqs_server(
 ) -> (TestServer, TestQuoteBook, DeqsClientApiClient) {
     let (msg_bus_tx, msg_bus_rx) = broadcast::channel::<Msg>(MSG_BUS_QUEUE_SIZE);
     let remove_quote_callback = TestServer::get_remove_quote_callback_function(msg_bus_tx.clone());
-    let internal_quote_book = InMemoryQuoteBook::default();
+    let internal_quote_book = InMemoryQuoteBook::new(test_fee_config());
+
     let synchronized_quote_book = SynchronizedQuoteBook::new(
         internal_quote_book,
         ledger_db.clone(),
@@ -157,6 +169,8 @@ async fn e2e_two_nodes_quote_propagation(logger: Logger) {
         TokenId::from(2),
         10000,
         20000,
+        &quote_book2.fee_address(),
+        calc_fee_amount(20000, quote_book2.fee_basis_points()),
         &mut rng,
         Some(&ledger_db),
     );
@@ -216,6 +230,8 @@ async fn e2e_two_nodes_dust_propagation(logger: Logger) {
         TokenId::from(2),
         500,
         20000,
+        &quote_book1.fee_address(),
+        calc_fee_amount(20000, quote_book1.fee_basis_points()),
         &mut rng,
         Some(&ledger_db),
     );
@@ -279,6 +295,8 @@ async fn e2e_two_nodes_quote_propagation_and_removal(logger: Logger) {
         TokenId::from(2),
         10000,
         20000,
+        &quote_book1.fee_address(),
+        calc_fee_amount(20000, quote_book1.fee_basis_points()),
         &mut rng,
         Some(&ledger_db),
     );
@@ -377,6 +395,8 @@ async fn e2e_two_nodes_initial_sync(logger: Logger) {
         counter_token_id: TokenId::from(2),
     };
 
+    let fee_config = test_fee_config();
+
     let server1_scis = (0..10)
         .map(|i| {
             deqs_mc_test_utils::create_sci(
@@ -384,6 +404,8 @@ async fn e2e_two_nodes_initial_sync(logger: Logger) {
                 pair.counter_token_id,
                 10000 * i,
                 20000,
+                &fee_config.fee_address,
+                calc_fee_amount(20000, fee_config.fee_basis_points),
                 &mut rng,
                 Some(&ledger_db),
             )
@@ -397,6 +419,8 @@ async fn e2e_two_nodes_initial_sync(logger: Logger) {
                 pair.counter_token_id,
                 10000,
                 20000 * i,
+                &fee_config.fee_address,
+                calc_fee_amount(20000 * i, fee_config.fee_basis_points),
                 &mut rng,
                 Some(&ledger_db),
             )
@@ -444,6 +468,7 @@ async fn e2e_multiple_nodes_play_nicely(logger: Logger) {
     let mut clients = Vec::new();
     let mut quote_books = Vec::new();
     let mut quotes = Vec::new();
+    let fee_config = test_fee_config();
     for _ in 0..NUM_NODES {
         let scis = (0..10)
             .map(|i| {
@@ -452,6 +477,8 @@ async fn e2e_multiple_nodes_play_nicely(logger: Logger) {
                     pair.counter_token_id,
                     10000 * i,
                     20000,
+                    &fee_config.fee_address,
+                    calc_fee_amount(20000, fee_config.fee_basis_points),
                     &mut rng,
                     Some(&ledger_db),
                 )
@@ -492,6 +519,8 @@ async fn e2e_multiple_nodes_play_nicely(logger: Logger) {
         pair.counter_token_id,
         1234,
         20000,
+        &fee_config.fee_address,
+        calc_fee_amount(20000, fee_config.fee_basis_points),
         &mut rng,
         Some(&ledger_db),
     );

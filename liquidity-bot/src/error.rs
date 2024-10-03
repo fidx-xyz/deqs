@@ -62,6 +62,9 @@ pub enum Error {
 
     /// RevealedTxOut: {0}
     RevealedTxOutError(RevealedTxOutError),
+
+    /// Currently missing DEQS server config
+    MissingDeqsServerConfig,
 }
 impl From<LedgerDbError> for Error {
     fn from(src: LedgerDbError) -> Self {
