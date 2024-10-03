@@ -244,6 +244,7 @@ impl Quote {
     }
 
     /// Create a new quote by specifying the exact value for each field.
+    /// Note that this does not enforece that the SCI is properly formed.
     pub fn new_from_fields(
         sci: SignedContingentInput,
         id: QuoteId,

@@ -161,15 +161,7 @@ fn main() {
                 .get_config(&Default::default())
                 .expect("get config failed");
 
-            let fee_config = config
-                .get_pair_fee_configs()
-                .iter()
-                .find(|pair_fee_config| {
-                    pair_fee_config.get_pair().base_token_id == *base_token_id
-                        && pair_fee_config.get_pair().counter_token_id == *counter_token_id
-                })
-                .expect("Could not found fee config for this pair");
-            let fee_address = PublicAddress::try_from(fee_config.get_fee_address())
+           let fee_address = PublicAddress::try_from(config.get_fee_address())
                 .expect("Invalid fee address received from config");
 
             log::info!(&logger, "Generating {} SCIs...", num_quotes);
@@ -185,7 +177,7 @@ fn main() {
                             0,
                             counter_amount,
                             &fee_address,
-                            calc_fee_amount(counter_amount, fee_config.fee_basis_points as u16),
+                            calc_fee_amount(counter_amount, config.fee_basis_points as u16),
                             &mut rng,
                             Some(&ledger_db),
                         )
@@ -196,7 +188,7 @@ fn main() {
                             base_amount,
                             counter_amount,
                             &fee_address,
-                            calc_fee_amount(counter_amount, fee_config.fee_basis_points as u16),
+                            calc_fee_amount(counter_amount, config.fee_basis_points as u16),
                             &mut rng,
                             Some(&ledger_db),
                         )

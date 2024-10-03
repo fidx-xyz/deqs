@@ -111,12 +111,7 @@ message Quote {
     uint64 timestamp = 7;
 }
 
-message PairFeeConfig {
-    Pair pair = 1;
-    external.PublicAddress fee_address = 2;
-    uint32 fee_basis_points = 3;
-}
-
 message GetConfigResponse {
-    repeated PairFeeConfig pair_fee_configs = 1;
-}
+    external.PublicAddress fee_address = 1;
+    uint32 fee_basis_points = 2;
+ }
