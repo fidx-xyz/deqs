@@ -13,7 +13,8 @@ use mc_util_uri::AdminUri;
 use std::{error::Error, path::PathBuf};
 
 /// Command-line configuration options for the DEQS server
-// Do not derive Serialize, this has a sensitive private key
+// Do not derive Serialize, this has a sensitive private key. If you add fields here you might
+// want to add them to the block inside main() that creates `config_json`.
 #[derive(Parser)]
 #[clap(version)]
 pub struct ServerConfig {

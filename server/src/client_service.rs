@@ -3,10 +3,11 @@
 use crate::{Msg, SVC_COUNTERS};
 use deqs_api::{
     deqs::{
-        GetQuotesRequest, GetQuotesResponse, LiveUpdate, LiveUpdatesRequest, QuoteStatusCode,
-        SubmitQuotesRequest, SubmitQuotesResponse,
+        GetConfigResponse, GetQuotesRequest, GetQuotesResponse, LiveUpdate, LiveUpdatesRequest,
+        QuoteStatusCode, SubmitQuotesRequest, SubmitQuotesResponse,
     },
     deqs_grpc::{create_deqs_client_api, DeqsClientApi},
+    empty::Empty,
 };
 use deqs_quote_book_api::{Error as QuoteBookError, Pair, QuoteBook};
 use futures::{FutureExt, SinkExt};
@@ -199,6 +200,16 @@ impl<OB: QuoteBook> ClientService<OB> {
         })
     }
 
+    fn get_config_impl(&self, _logger: &Logger) -> Result<GetConfigResponse, RpcStatus> {
+        let fee_address = self.quote_book.fee_address();
+        let fee_basis_points = self.quote_book.fee_basis_points();
+
+        let mut resp = GetConfigResponse::default();
+        resp.set_fee_address((&fee_address).into());
+        resp.set_fee_basis_points(fee_basis_points as u32);
+        Ok(resp)
+    }
+
     async fn live_updates_impl(
         req: LiveUpdatesRequest,
         mut responses: ServerStreamingSink<LiveUpdate>,
@@ -286,6 +297,13 @@ impl<OB: QuoteBook> DeqsClientApi for ClientService<OB> {
                     }
                 });
             ctx.spawn(future)
+        })
+    }
+
+    fn get_config(&mut self, ctx: RpcContext, _req: Empty, sink: UnarySink<GetConfigResponse>) {
+        let _timer = SVC_COUNTERS.req(&ctx);
+        scoped_global_logger(&rpc_logger(&ctx, &self.logger), |logger| {
+            send_result(ctx, sink, self.get_config_impl(logger), logger)
         })
     }
 }

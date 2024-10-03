@@ -161,7 +161,7 @@ fn main() {
                 .get_config(&Default::default())
                 .expect("get config failed");
 
-           let fee_address = PublicAddress::try_from(config.get_fee_address())
+            let fee_address = PublicAddress::try_from(config.get_fee_address())
                 .expect("Invalid fee address received from config");
 
             log::info!(&logger, "Generating {} SCIs...", num_quotes);
