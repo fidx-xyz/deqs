@@ -9,6 +9,7 @@ option java_package = "com.mobilecoin.api";
 option go_package = "mobilecoin/api";
 
 import "external.proto";
+import "google/protobuf/empty.proto";
 
 service DeqsClientAPI {
     /// This is called to submit a new quote
@@ -19,6 +20,9 @@ service DeqsClientAPI {
 
     /// Subscribe for live updates to the quote book
     rpc LiveUpdates(LiveUpdatesRequest) returns (stream LiveUpdate);
+
+    /// Get the configuration for this server.
+    rpc GetConfig(google.protobuf.Empty) returns (GetConfigResponse) {}
 }
 
 message SubmitQuotesRequest {
@@ -105,4 +109,14 @@ message Quote {
     uint64 base_range_max = 5;
     uint64 max_counter_tokens = 6;
     uint64 timestamp = 7;
+}
+
+message PairFeeConfig {
+    Pair pair = 1;
+    external.PublicAddress fee_address = 2;
+    uint32 fee_basis_points = 3;
+}
+
+message GetConfigResponse {
+    repeated PairFeeConfig pair_fee_configs = 1;
 }

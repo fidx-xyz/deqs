@@ -1475,6 +1475,7 @@ dependencies = [
  "futures",
  "grpcio",
  "hex",
+ "mc-account-keys",
  "mc-api",
  "mc-common",
  "mc-ledger-db",

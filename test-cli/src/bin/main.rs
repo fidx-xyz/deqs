@@ -8,8 +8,9 @@ use deqs_api::{
 };
 use deqs_mc_test_utils::{create_partial_sci, create_sci};
 use deqs_p2p::libp2p::PeerId;
-use deqs_quote_book_api::Quote;
+use deqs_quote_book_api::{calc_fee_amount, Quote};
 use grpcio::{ChannelBuilder, EnvBuilder};
+use mc_account_keys::PublicAddress;
 use mc_common::logger::{log, o};
 use mc_ledger_db::LedgerDB;
 use mc_transaction_types::TokenId;
@@ -154,6 +155,23 @@ fn main() {
             // Open the ledger db
             let ledger_db = LedgerDB::open(&ledger_db).expect("Could not open ledger db");
 
+            // Get fee configuration for our pair.
+            log::info!(&logger, "Getting configuration from server...");
+            let config = client_api
+                .get_config(&Default::default())
+                .expect("get config failed");
+
+            let fee_config = config
+                .get_pair_fee_configs()
+                .iter()
+                .find(|pair_fee_config| {
+                    pair_fee_config.get_pair().base_token_id == *base_token_id
+                        && pair_fee_config.get_pair().counter_token_id == *counter_token_id
+                })
+                .expect("Could not found fee config for this pair");
+            let fee_address = PublicAddress::try_from(fee_config.get_fee_address())
+                .expect("Invalid fee address received from config");
+
             log::info!(&logger, "Generating {} SCIs...", num_quotes);
 
             let scis = (0..num_quotes)
@@ -166,6 +184,8 @@ fn main() {
                             0,
                             0,
                             counter_amount,
+                            &fee_address,
+                            calc_fee_amount(counter_amount, fee_config.fee_basis_points as u16),
                             &mut rng,
                             Some(&ledger_db),
                         )
@@ -175,6 +195,8 @@ fn main() {
                             counter_token_id,
                             base_amount,
                             counter_amount,
+                            &fee_address,
+                            calc_fee_amount(counter_amount, fee_config.fee_basis_points as u16),
                             &mut rng,
                             Some(&ledger_db),
                         )
