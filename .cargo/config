@@ -1,5 +1,5 @@
 [build]
-#rustflags = ["-D", "warnings"]
+rustflags = ["-D", "warnings"]
 
 # Using 'cfg` is broken, see https://github.com/rust-lang/cargo/issues/6858
 # [target.'cfg(target_arch = "x86_64")']

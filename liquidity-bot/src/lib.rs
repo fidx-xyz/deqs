@@ -1056,7 +1056,7 @@ mod tests {
             let mut config_response = GetConfigResponse::default();
             config_response.set_fee_address((&fee_config.fee_address).into());
             config_response.set_fee_basis_points(fee_config.fee_basis_points as u32);
-            deqs_server.set_config_response(Ok(config_response));
+            deqs_server.set_config_response(Ok(config_response.clone()));
 
             let pairs = pairs
                 .iter()
@@ -1074,7 +1074,7 @@ mod tests {
                 shutdown_rx,
                 shutdown_ack_tx: Some(shutdown_ack_tx),
                 logger: logger.clone(),
-                deqs_config: None,
+                deqs_config: Some(config_response),
             };
 
             Self {
@@ -1124,9 +1124,6 @@ mod tests {
     async fn update_pending_tx_outs_from_received_tx_outs_behaves_correctly(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
         assert_eq!(test_ctx.task.pending_tx_outs.len(), 0);
-
-        // This test requires that we have cached the deqs server config
-        test_ctx.task.update_deqs_config().await.unwrap();
 
         // Create four MatchedTxOuts, two for each pair the bot is offering and two
         // unrelated ones.
@@ -1199,9 +1196,6 @@ mod tests {
     #[async_test_with_logger]
     async fn submit_pending_tx_outs_behaves_correctly(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
-
-        // This test requires that we have cached the deqs server config
-        test_ctx.task.update_deqs_config().await.unwrap();
 
         let matched_tx_outs = vec![
             test_ctx.create_matched_tx_out(Amount::new(100, TokenId::MOB)),
@@ -1308,9 +1302,6 @@ mod tests {
     async fn update_pending_tx_outs_from_received_tx_outs_ignores_duplicates(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
 
-        // This test requires that we have cached the deqs server config
-        test_ctx.task.update_deqs_config().await.unwrap();
-
         // Note that while they have the same value, they are different TxOuts so not
         // considered duplicates.
         let matched_tx_outs = vec![
@@ -1381,9 +1372,6 @@ mod tests {
     #[async_test_with_logger]
     async fn resubmit_listed_tx_outs_behaves_correctly(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
-
-        // This test requires that we have cached the deqs server config
-        test_ctx.task.update_deqs_config().await.unwrap();
 
         let mtxo1 = test_ctx.create_matched_tx_out(Amount::new(100, TokenId::MOB));
         let mtxo2 = test_ctx.create_matched_tx_out(Amount::new(100, TokenId::MOB));
@@ -1556,9 +1544,6 @@ mod tests {
     async fn create_pending_tx_out_errors_on_unconfigured_token(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
 
-        // This test requires that we have cached the deqs server config
-        test_ctx.task.update_deqs_config().await.unwrap();
-
         let token_id = TokenId::from(123);
         let mtxo = test_ctx.create_matched_tx_out(Amount::new(100, token_id));
         assert_matches!(
@@ -1570,9 +1555,6 @@ mod tests {
     #[async_test_with_logger]
     async fn create_pending_tx_out_calculates_correct_swap_rate(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
-
-        // This test requires that we have cached the deqs server config
-        test_ctx.task.update_deqs_config().await.unwrap();
 
         // MOB -> eUSD (token id 1) ratio is 2:1 (see default_pairs())
         for (mob_amount, expected_eusd_amount) in [
@@ -1586,31 +1568,25 @@ mod tests {
             let mtxo = test_ctx.create_matched_tx_out(Amount::new(mob_amount, TokenId::MOB));
             let ptxo = test_ctx.task.create_pending_tx_out(mtxo).unwrap();
 
-            let (amount0, _) = ptxo
-                .sci
-                .tx_in
-                .input_rules
-                .as_ref()
-                .unwrap()
-                .partial_fill_outputs[0]
-                .reveal_amount()
-                .unwrap();
+            let mut amounts = (0..=1)
+                .map(|idx| {
+                    let (amount, _) = ptxo
+                        .sci
+                        .tx_in
+                        .input_rules
+                        .as_ref()
+                        .unwrap()
+                        .partial_fill_outputs[idx]
+                        .reveal_amount()
+                        .unwrap();
 
-            let (amount1, _) = ptxo
-                .sci
-                .tx_in
-                .input_rules
-                .as_ref()
-                .unwrap()
-                .partial_fill_outputs[1]
-                .reveal_amount()
-                .unwrap();
+                    assert_eq!(amount.token_id, TokenId::from(1));
 
-            assert_eq!(amount0.token_id, TokenId::from(1));
-            assert_eq!(amount1.token_id, TokenId::from(1));
+                    amount.value
+                })
+                .collect::<Vec<_>>();
 
             // Sort to make this test immune from the order of the outputs in the SCI
-            let mut amounts = [amount0.value, amount1.value];
             amounts.sort();
 
             assert_eq!(
@@ -1627,31 +1603,24 @@ mod tests {
             let mtxo = test_ctx.create_matched_tx_out(Amount::new(eusd_amount, TokenId::from(1)));
             let ptxo = test_ctx.task.create_pending_tx_out(mtxo).unwrap();
 
-            let (amount0, _) = ptxo
-                .sci
-                .tx_in
-                .input_rules
-                .as_ref()
-                .unwrap()
-                .partial_fill_outputs[0]
-                .reveal_amount()
-                .unwrap();
+            let mut amounts = (0..=1)
+                .map(|idx| {
+                    let (amount, _) = ptxo
+                        .sci
+                        .tx_in
+                        .input_rules
+                        .as_ref()
+                        .unwrap()
+                        .partial_fill_outputs[idx]
+                        .reveal_amount()
+                        .unwrap();
 
-            let (amount1, _) = ptxo
-                .sci
-                .tx_in
-                .input_rules
-                .as_ref()
-                .unwrap()
-                .partial_fill_outputs[1]
-                .reveal_amount()
-                .unwrap();
-
-            assert_eq!(amount0.token_id, TokenId::MOB);
-            assert_eq!(amount1.token_id, TokenId::MOB);
+                    assert_eq!(amount.token_id, TokenId::MOB);
+                    amount.value
+                })
+                .collect::<Vec<_>>();
 
             // Sort to make this test immune from the order of the outputs in the SCI
-            let mut amounts = [amount0.value, amount1.value];
             amounts.sort();
 
             assert_eq!(
@@ -1674,9 +1643,6 @@ mod tests {
     #[async_test_with_logger]
     async fn unlist_spend_tx_outs_behaves_correctly(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
-
-        // This test requires that we have cached the deqs server config
-        test_ctx.task.update_deqs_config().await.unwrap();
 
         // The bot is going to generate an SCI that offers MOB in exchange for eUSD.
         let mob_value_offered = 1000 * MILLIMOB_TO_PICOMOB;
@@ -1730,9 +1696,6 @@ mod tests {
     #[async_test_with_logger]
     async fn look_for_fulfilled_scis_identifies_consumed_scis(logger: Logger) {
         let mut test_ctx = TestContext::new(&default_pairs(), &logger);
-
-        // This test requires that we have cached the deqs server config
-        test_ctx.task.update_deqs_config().await.unwrap();
 
         // The bot is going to generate an SCI that offers MOB in exchange for eUSD.
         let mob_value_offered = 1000 * MILLIMOB_TO_PICOMOB;

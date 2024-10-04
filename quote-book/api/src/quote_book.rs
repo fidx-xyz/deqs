@@ -8,7 +8,7 @@ use mc_transaction_core::PublicAddress;
 use mc_transaction_extra::SignedContingentInput;
 use std::ops::RangeBounds;
 
-/// Quote book - an object for managing a collectin of quotes
+/// Quote book - an object for managing a collection of quotes
 pub trait QuoteBook: Clone + Send + Sync + 'static {
     /// The public address this quote book expects fees at
     fn fee_address(&self) -> PublicAddress;

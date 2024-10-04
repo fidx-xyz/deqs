@@ -141,7 +141,8 @@ async fn test_basic_submission(logger: Logger) {
 
     // The SCI should have two partial fill outputs targetted at the correct
     // accounts, with the correct amounts (one that pays us back and one that
-    // pays the DEQS fee) TODO test that the output goes to the correct account.
+    // pays the DEQS fee).
+    // TODO test that the outputs go to the correct accounts.
     let input_rules = sci.tx_in.input_rules.as_ref().unwrap();
     assert_eq!(input_rules.partial_fill_outputs.len(), 2);
 
