@@ -2,6 +2,7 @@
 
 use crate::{calc_fee_amount, Error, Pair, QuoteId};
 use mc_crypto_keys::RistrettoPrivate;
+use mc_transaction_core::tx::TxOut;
 use mc_transaction_extra::SignedContingentInput;
 use mc_transaction_types::TokenId;
 use serde::{Deserialize, Serialize};
@@ -94,26 +95,18 @@ impl Quote {
 
                 // One should be the fee output and one should be the output that pays back the
                 // SCI creator
-                let (fee_index, counter_index) = if input_rules.required_outputs[0]
-                    .view_key_match(fee_view_private_key)
-                    .is_ok()
-                {
-                    (0, 1)
-                } else if input_rules.required_outputs[1]
-                    .view_key_match(fee_view_private_key)
-                    .is_ok()
-                {
-                    (1, 0)
-                } else {
-                    return Err(Error::UnsupportedSci(
-                        "Neither of the required outputs pays the fee address".into(),
-                    ));
-                };
-
+                let (fee_index, counter_index) = identify_fee_and_counter_outputs(
+                    &[
+                        &input_rules.required_outputs[0],
+                        &input_rules.required_outputs[1],
+                    ],
+                    fee_view_private_key,
+                )?;
                 let required_fee_amount = calc_fee_amount(
                     sci.required_output_amounts[counter_index].value,
                     required_fee_basis_points,
                 );
+
                 if required_fee_amount > sci.required_output_amounts[fee_index].value {
                     return Err(Error::UnsupportedSci(format!(
                         "Expected a required fee output of at least {required_fee_amount}, got {}",
@@ -155,23 +148,13 @@ impl Quote {
                 }
                 let partial_amounts = [partial_amount0, partial_amount1];
 
-                let (fee_index, counter_index) = if input_rules.partial_fill_outputs[0]
-                    .tx_out
-                    .view_key_match(fee_view_private_key)
-                    .is_ok()
-                {
-                    (0, 1)
-                } else if input_rules.partial_fill_outputs[1]
-                    .tx_out
-                    .view_key_match(fee_view_private_key)
-                    .is_ok()
-                {
-                    (1, 0)
-                } else {
-                    return Err(Error::UnsupportedSci(
-                        "Neither of the partial fill outputs pays the fee address".into(),
-                    ));
-                };
+                let (fee_index, counter_index) = identify_fee_and_counter_outputs(
+                    &[
+                        &input_rules.partial_fill_outputs[0].tx_out,
+                        &input_rules.partial_fill_outputs[1].tx_out,
+                    ],
+                    fee_view_private_key,
+                )?;
 
                 let counter_amount = partial_amounts[counter_index];
                 let fee_amount = partial_amounts[fee_index];
@@ -407,6 +390,37 @@ impl PartialOrd for Quote {
     }
 }
 
+/// A helper for determining which of two outputs goes to the fee address and
+/// which goes to the counterparty We do not allow both outputs to go to the fee
+/// address, that should never happen in real life.
+/// Returns (index of fee output, index of other output)
+fn identify_fee_and_counter_outputs(
+    tx_outs: &[&TxOut],
+    fee_view_private_key: &RistrettoPrivate,
+) -> Result<(usize, usize), Error> {
+    if tx_outs.len() != 2 {
+        return Err(Error::UnsupportedSci(format!(
+            "Expected 2 tx outs, got {}",
+            tx_outs.len(),
+        )));
+    }
+
+    let out0_matches_fee = tx_outs[0].view_key_match(fee_view_private_key).is_ok();
+    let out1_matches_fee = tx_outs[1].view_key_match(fee_view_private_key).is_ok();
+
+    match (out0_matches_fee, out1_matches_fee) {
+        (false, false) => Err(Error::UnsupportedSci(
+            "Could not identify fee txout".to_string(),
+        )),
+        (true, true) => Err(Error::UnsupportedSci(
+            "Multiple fee outputs are not supported".to_string(),
+        )),
+
+        (true, false) => Ok((0, 1)),
+        (false, true) => Ok((1, 0)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,7 +491,9 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        // We use a different seed here than in most other tests so that our fee account
+        // does not end up being the same as any other accounts.
+        let mut rng: StdRng = SeedableRng::from_seed([251u8; 32]);
         let fee_account = AccountKey::random(&mut rng);
         let non_fee_account = AccountKey::random(&mut rng);
 
@@ -530,9 +546,7 @@ mod tests {
         );
         assert_eq!(
             Quote::new(sci, None, fee_account.view_private_key(), 100),
-            Err(Error::UnsupportedSci(
-                "Neither of the required outputs pays the fee address".into()
-            ))
+            Err(Error::UnsupportedSci("Could not identify fee txout".into()))
         );
 
         // Helper struct for partial fill tests
@@ -587,9 +601,7 @@ mod tests {
             );
             assert_eq!(
                 Quote::new(sci, None, fee_account.view_private_key(), 100),
-                Err(Error::UnsupportedSci(
-                    "Neither of the partial fill outputs pays the fee address".into()
-                ))
+                Err(Error::UnsupportedSci("Could not identify fee txout".into()))
             );
 
             // Paying less than the required fee gets rejected

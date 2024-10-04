@@ -1024,7 +1024,9 @@ mod tests {
     }
     impl TestContext {
         pub fn new(pairs: &[(TokenId, TokenId, Decimal)], logger: &Logger) -> Self {
-            let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+            // We use a different seed here than in most other tests so that our fee account
+            // does not end up being the same as any other accounts.
+            let mut rng: StdRng = SeedableRng::from_seed([251u8; 32]);
             let account_key = AccountKey::random(&mut rng);
             let fee_account = AccountKey::random(&mut rng);
 

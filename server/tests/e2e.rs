@@ -1,5 +1,7 @@
 // Copyright (c) 2023 MobileCoin Inc.
 
+#![feature(assert_matches)]
+
 use deqs_api::{
     deqs::{QuoteStatusCode, SubmitQuotesRequest},
     deqs_grpc::DeqsClientApiClient,
@@ -23,7 +25,9 @@ use mc_transaction_types::{BlockVersion, TokenId};
 use mc_util_grpc::ConnectionUriGrpcioChannel;
 use postage::broadcast;
 use rand::{rngs::StdRng, SeedableRng};
-use std::{collections::BTreeSet, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    assert_matches::assert_matches, collections::BTreeSet, str::FromStr, sync::Arc, time::Duration,
+};
 use tokio_retry::{strategy::FixedInterval, Retry};
 
 /// Maximum number of messages that can be queued in the message bus.
@@ -44,7 +48,9 @@ fn create_and_initialize_test_ledger() -> LedgerDB {
 }
 
 fn test_fee_config() -> FeeConfig {
-    let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+    // We use a different seed here than in most other tests so that our fee account
+    // does not end up being the same as any other accounts.
+    let mut rng: StdRng = SeedableRng::from_seed([251u8; 32]);
     let fee_account = AccountKey::random(&mut rng);
 
     FeeConfig {
@@ -62,11 +68,12 @@ async fn start_deqs_server(
     p2p_bootstrap_from: &[&TestServer],
     initial_scis: &[SignedContingentInput],
     quote_minimum_map: Vec<(TokenId, u64)>,
+    fee_config: FeeConfig,
     logger: &Logger,
 ) -> (TestServer, TestQuoteBook, DeqsClientApiClient) {
     let (msg_bus_tx, msg_bus_rx) = broadcast::channel::<Msg>(MSG_BUS_QUEUE_SIZE);
     let remove_quote_callback = TestServer::get_remove_quote_callback_function(msg_bus_tx.clone());
-    let internal_quote_book = InMemoryQuoteBook::new(test_fee_config());
+    let internal_quote_book = InMemoryQuoteBook::new(fee_config);
 
     let synchronized_quote_book = SynchronizedQuoteBook::new(
         internal_quote_book,
@@ -157,11 +164,18 @@ async fn e2e_two_nodes_quote_propagation(logger: Logger) {
     let ledger_db = create_and_initialize_test_ledger();
 
     // Start two DEQS servers
-    let (deqs_server1, _quote_book1, client1) =
-        start_deqs_server(&ledger_db, &[], &[], vec![], &logger).await;
+    let (deqs_server1, quote_book1, client1) =
+        start_deqs_server(&ledger_db, &[], &[], vec![], test_fee_config(), &logger).await;
 
-    let (_deqs_server2, quote_book2, _client2) =
-        start_deqs_server(&ledger_db, &[&deqs_server1], &[], vec![], &logger).await;
+    let (_deqs_server2, quote_book2, _client2) = start_deqs_server(
+        &ledger_db,
+        &[&deqs_server1],
+        &[],
+        vec![],
+        test_fee_config(),
+        &logger,
+    )
+    .await;
 
     // Submit an SCI to the first server
     let sci = deqs_mc_test_utils::create_sci(
@@ -170,7 +184,7 @@ async fn e2e_two_nodes_quote_propagation(logger: Logger) {
         10000,
         20000,
         &quote_book2.fee_address(),
-        calc_fee_amount(20000, quote_book2.fee_basis_points()),
+        calc_fee_amount(20000, quote_book1.fee_basis_points()),
         &mut rng,
         Some(&ledger_db),
     );
@@ -198,6 +212,81 @@ async fn e2e_two_nodes_quote_propagation(logger: Logger) {
     assert_eq!(quote.sci(), &sci);
 }
 
+/// Test that two nodes do not propagate quotes if their fee configuration is
+/// mismatched.
+#[async_test_with_logger(flavor = "multi_thread")]
+async fn e2e_two_nodes_quote_propagation_refuses_mismatched_fee(logger: Logger) {
+    let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+    let ledger_db = create_and_initialize_test_ledger();
+
+    let mut fee_config2 = test_fee_config();
+    fee_config2.fee_basis_points = 10000;
+
+    // Start two DEQS servers
+    let (deqs_server1, quote_book1, client1) =
+        start_deqs_server(&ledger_db, &[], &[], vec![], test_fee_config(), &logger).await;
+
+    let (_deqs_server2, quote_book2, _client2) = start_deqs_server(
+        &ledger_db,
+        &[&deqs_server1],
+        &[],
+        vec![],
+        fee_config2,
+        &logger,
+    )
+    .await;
+
+    // Submit an SCI to the first server
+    let sci = deqs_mc_test_utils::create_sci(
+        TokenId::from(1),
+        TokenId::from(2),
+        10000,
+        20000,
+        &quote_book1.fee_address(),
+        calc_fee_amount(20000, quote_book1.fee_basis_points()),
+        &mut rng,
+        Some(&ledger_db),
+    );
+
+    // Sanity to ensure no other test has polluted the global metrics
+    assert_eq!(
+        deqs_server::P2P_GOSSIP_METRICS
+            .num_error
+            .with_label_values(&["SciQuoteAdded"])
+            .get(),
+        0
+    );
+
+    let req = SubmitQuotesRequest {
+        quotes: vec![(&sci).into()].into(),
+        ..Default::default()
+    };
+    let resp = client1.submit_quotes(&req).expect("submit quote failed");
+    let quote_id = QuoteId::try_from(resp.get_quotes()[0].get_id()).unwrap();
+
+    // After a few moments the second server should have the SCI in its quote book
+    let retry_strategy = FixedInterval::new(Duration::from_secs(1)).take(10); // limit to 10 retries
+    Retry::spawn(retry_strategy, || async {
+        let encountered_failed_sci_quote_add = deqs_server::P2P_GOSSIP_METRICS
+            .num_error
+            .with_label_values(&["SciQuoteAdded"])
+            .get()
+            == 1;
+
+        if encountered_failed_sci_quote_add {
+            Ok(())
+        } else {
+            Err("not yet")
+        }
+    })
+    .await
+    .unwrap();
+
+    // Another sanity that the quote isnt found on the 2nd server.
+    assert_matches!(quote_book1.get_quote_by_id(&quote_id), Ok(Some(_)));
+    assert_eq!(quote_book2.get_quote_by_id(&quote_id), Ok(None));
+}
+
 /// Test that nodes don't accept dust quotes directly, but will propagate dust
 /// quotes to each other.
 #[async_test_with_logger(flavor = "multi_thread")]
@@ -211,6 +300,7 @@ async fn e2e_two_nodes_dust_propagation(logger: Logger) {
         &[],
         &[],
         vec![(TokenId::from(1), 1000)],
+        test_fee_config(),
         &logger,
     )
     .await;
@@ -220,6 +310,7 @@ async fn e2e_two_nodes_dust_propagation(logger: Logger) {
         &[&deqs_server1],
         &[],
         vec![(TokenId::from(1), 100)],
+        test_fee_config(),
         &logger,
     )
     .await;
@@ -284,10 +375,17 @@ async fn e2e_two_nodes_quote_propagation_and_removal(logger: Logger) {
 
     // Start two DEQS servers
     let (deqs_server1, quote_book1, client1) =
-        start_deqs_server(&ledger_db, &[], &[], vec![], &logger).await;
+        start_deqs_server(&ledger_db, &[], &[], vec![], test_fee_config(), &logger).await;
 
-    let (_deqs_server2, quote_book2, _client2) =
-        start_deqs_server(&ledger_db, &[&deqs_server1], &[], vec![], &logger).await;
+    let (_deqs_server2, quote_book2, _client2) = start_deqs_server(
+        &ledger_db,
+        &[&deqs_server1],
+        &[],
+        vec![],
+        test_fee_config(),
+        &logger,
+    )
+    .await;
 
     // Submit an SCI to the first server
     let sci = deqs_mc_test_utils::create_sci(
@@ -428,11 +526,25 @@ async fn e2e_two_nodes_initial_sync(logger: Logger) {
         .collect::<Vec<_>>();
 
     // Start two DEQS servers
-    let (deqs_server1, quote_book1, _client1) =
-        start_deqs_server(&ledger_db, &[], &server1_scis, vec![], &logger).await;
+    let (deqs_server1, quote_book1, _client1) = start_deqs_server(
+        &ledger_db,
+        &[],
+        &server1_scis,
+        vec![],
+        test_fee_config(),
+        &logger,
+    )
+    .await;
 
-    let (_deqs_server2, quote_book2, _client2) =
-        start_deqs_server(&ledger_db, &[&deqs_server1], &server2_scis, vec![], &logger).await;
+    let (_deqs_server2, quote_book2, _client2) = start_deqs_server(
+        &ledger_db,
+        &[&deqs_server1],
+        &server2_scis,
+        vec![],
+        test_fee_config(),
+        &logger,
+    )
+    .await;
 
     // The combined set of quotes.
     let quotes1 = quote_book1.get_quotes(&pair, .., 0).unwrap();
@@ -490,8 +602,15 @@ async fn e2e_multiple_nodes_play_nicely(logger: Logger) {
             .map(|server| vec![server])
             .unwrap_or_default();
 
-        let (server, quote_book, client) =
-            start_deqs_server(&ledger_db, &bootstrap_peers, &scis, vec![], &logger).await;
+        let (server, quote_book, client) = start_deqs_server(
+            &ledger_db,
+            &bootstrap_peers,
+            &scis,
+            vec![],
+            test_fee_config(),
+            &logger,
+        )
+        .await;
 
         if let Some(prev_server) = last_server.take() {
             servers.push(prev_server);

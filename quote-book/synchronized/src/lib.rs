@@ -364,7 +364,7 @@ mod tests {
     }
 
     fn setup(logger: Logger) -> TestContext {
-        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let mut rng: StdRng = SeedableRng::from_seed([251u8; 32]);
         let fee_account = AccountKey::random(&mut rng);
         let removed_quotes_sent_to_live_updates = Arc::new(Mutex::new(vec![]));
         let removed_quotes_for_callback = removed_quotes_sent_to_live_updates.clone();
@@ -463,7 +463,7 @@ mod tests {
         let synchronized_quote_book = test_context.synchronized_quote_book;
 
         let pair = test_suite::pair();
-        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let mut rng: StdRng = SeedableRng::from_seed([251u8; 32]);
         let fee_account = AccountKey::random(&mut rng);
 
         let sci = test_suite::create_sci(
@@ -530,7 +530,7 @@ mod tests {
         let synchronized_quote_book = test_context.synchronized_quote_book;
 
         let pair = test_suite::pair();
-        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let mut rng: StdRng = SeedableRng::from_seed([251u8; 32]);
         let fee_account = AccountKey::random(&mut rng);
 
         let sci = test_suite::create_sci(

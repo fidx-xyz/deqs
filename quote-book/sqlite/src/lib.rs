@@ -326,7 +326,9 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_quote_book(dir: &TempDir, logger: Logger) -> SqliteQuoteBook<InMemoryQuoteBook> {
-        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        // We use a different seed here than in most other tests so that our fee account
+        // does not end up being the same as any other accounts.
+        let mut rng: StdRng = SeedableRng::from_seed([251u8; 32]);
         let fee_account = AccountKey::random(&mut rng);
 
         let file_path = dir.path().join("quotes.db");
