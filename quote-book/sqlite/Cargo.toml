@@ -32,7 +32,7 @@ mc-crypto-ring-signature-signer = { path = "../../mobilecoin/crypto/ring-signatu
 mc-fog-report-validation-test-utils = { path = "../../mobilecoin/fog/report/validation/test-utils" }
 mc-transaction-builder = { path = "../../mobilecoin/transaction/builder", features = ["test-only"] }
 mc-transaction-core = { path = "../../mobilecoin/transaction/core" }
-
-tempfile = "3.4"
 rand = "0.8"
 rand_core = "0.6"
+
+tempfile = "3.4"
