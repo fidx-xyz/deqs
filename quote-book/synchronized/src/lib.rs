@@ -1,8 +1,10 @@
 // Copyright (c) 2023 MobileCoin Inc.
 
 use deqs_quote_book_api::{Error, Pair, Quote, QuoteBook, QuoteId};
+use mc_account_keys::PublicAddress;
 use mc_blockchain_types::BlockIndex;
 use mc_common::logger::{log, Logger};
+use mc_crypto_keys::RistrettoPrivate;
 use mc_crypto_ring_signature::KeyImage;
 use mc_ledger_db::{Error as LedgerError, Ledger};
 use std::{
@@ -110,6 +112,18 @@ where
     Q: QuoteBook,
     L: Ledger + Clone + Sync + 'static,
 {
+    fn fee_address(&self) -> PublicAddress {
+        self.quote_book.fee_address()
+    }
+
+    fn fee_basis_points(&self) -> u16 {
+        self.quote_book.fee_basis_points()
+    }
+
+    fn fee_view_private_key(&self) -> RistrettoPrivate {
+        self.quote_book.fee_view_private_key()
+    }
+
     fn add_quote(&self, quote: &Quote) -> Result<(), Error> {
         // Check to see if the ledger's current block index is already at or past the
         // max_tombstone_block for the sci.
@@ -324,6 +338,7 @@ impl<DB: Ledger, Q: QuoteBook> DbFetcherThread<DB, Q> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deqs_quote_book_api::{calc_fee_amount, FeeConfig};
     use deqs_quote_book_in_memory::InMemoryQuoteBook;
     use deqs_quote_book_test_suite as test_suite;
     use mc_account_keys::AccountKey;
@@ -338,16 +353,19 @@ mod tests {
         Ledger, LedgerDB,
     };
     use mc_transaction_builder::test_utils::get_transaction;
-    use mc_transaction_core::TokenId;
+    use mc_transaction_core::{Amount, TokenId};
     use rand::{rngs::StdRng, SeedableRng};
     use std::{sync::Mutex, vec};
     struct TestContext {
         ledger: LedgerDB,
         removed_quotes_sent_to_live_updates: Arc<Mutex<Vec<Quote>>>,
         synchronized_quote_book: SynchronizedQuoteBook<InMemoryQuoteBook, LedgerDB>,
+        fee_account: AccountKey,
     }
 
     fn setup(logger: Logger) -> TestContext {
+        let mut rng: StdRng = SeedableRng::from_seed([251u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
         let removed_quotes_sent_to_live_updates = Arc::new(Mutex::new(vec![]));
         let removed_quotes_for_callback = removed_quotes_sent_to_live_updates.clone();
         let remove_quote_callback = Box::new(move |quotes| {
@@ -357,7 +375,11 @@ mod tests {
                 .extend(quotes);
         });
         let ledger = create_and_initialize_test_ledger();
-        let internal_quote_book = InMemoryQuoteBook::default();
+        let internal_quote_book = InMemoryQuoteBook::new(FeeConfig {
+            fee_address: fee_account.default_subaddress(),
+            fee_basis_points: 10,
+            fee_view_private_key: *fee_account.view_private_key(),
+        });
         let synchronized_quote_book = SynchronizedQuoteBook::new(
             internal_quote_book,
             ledger.clone(),
@@ -368,6 +390,7 @@ mod tests {
             removed_quotes_sent_to_live_updates,
             ledger,
             synchronized_quote_book,
+            fee_account,
         }
     }
 
@@ -440,11 +463,18 @@ mod tests {
         let synchronized_quote_book = test_context.synchronized_quote_book;
 
         let pair = test_suite::pair();
-        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let mut rng: StdRng = SeedableRng::from_seed([251u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
 
-        let sci_builder =
-            test_suite::create_sci_builder(&pair, 10, 20, &mut rng, Some(&test_context.ledger));
-        let sci = sci_builder.build(&NoKeysRingSigner {}, &mut rng).unwrap();
+        let sci = test_suite::create_sci(
+            &pair,
+            10,
+            20,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+            Some(&test_context.ledger),
+        );
 
         let block_version = BlockVersion::MAX;
         let fog_resolver = MockFogResolver::default();
@@ -478,7 +508,15 @@ mod tests {
         );
 
         // Adding a quote that isn't already in the ledger should work
-        let sci = test_suite::create_sci(&pair, 10, 20, &mut rng, Some(&test_context.ledger));
+        let sci = test_suite::create_sci(
+            &pair,
+            10,
+            20,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+            Some(&test_context.ledger),
+        );
         let quote = synchronized_quote_book.add_sci(sci, None).unwrap();
 
         let quotes = synchronized_quote_book.get_quotes(&pair, .., 0).unwrap();
@@ -492,11 +530,18 @@ mod tests {
         let synchronized_quote_book = test_context.synchronized_quote_book;
 
         let pair = test_suite::pair();
-        let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let mut rng: StdRng = SeedableRng::from_seed([251u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
 
-        let sci_builder =
-            test_suite::create_sci_builder(&pair, 10, 20, &mut rng, Some(&test_context.ledger));
-        let sci = sci_builder.build(&NoKeysRingSigner {}, &mut rng).unwrap();
+        let sci = test_suite::create_sci(
+            &pair,
+            10,
+            20,
+            &fee_account.default_subaddress(),
+            100,
+            &mut rng,
+            Some(&test_context.ledger),
+        );
         let key_image = sci.key_image();
         // Adding a quote that isn't already in the ledger should work
         let quote = synchronized_quote_book.add_sci(sci, None).unwrap();
@@ -560,6 +605,15 @@ mod tests {
         let mut sci_builder =
             test_suite::create_sci_builder(&pair, 10, 20, &mut rng, Some(&test_context.ledger));
         sci_builder.set_tombstone_block(ledger.num_blocks().unwrap() - 2);
+
+        sci_builder
+            .add_required_output(
+                Amount::new(calc_fee_amount(20, 10), pair.counter_token_id),
+                &test_context.fee_account.default_subaddress(),
+                &mut rng,
+            )
+            .unwrap();
+
         let sci = sci_builder.build(&NoKeysRingSigner {}, &mut rng).unwrap();
 
         assert_eq!(
@@ -571,6 +625,15 @@ mod tests {
         let mut sci_builder2 =
             test_suite::create_sci_builder(&pair, 10, 20, &mut rng, Some(&test_context.ledger));
         sci_builder2.set_tombstone_block(0);
+
+        sci_builder2
+            .add_required_output(
+                Amount::new(calc_fee_amount(20, 10), pair.counter_token_id),
+                &test_context.fee_account.default_subaddress(),
+                &mut rng,
+            )
+            .unwrap();
+
         let sci2 = sci_builder2.build(&NoKeysRingSigner {}, &mut rng).unwrap();
 
         let quote2 = synchronized_quote_book.add_sci(sci2, None).unwrap();
@@ -583,6 +646,15 @@ mod tests {
         let mut sci_builder3 =
             test_suite::create_sci_builder(&pair, 10, 20, &mut rng, Some(&test_context.ledger));
         sci_builder3.set_tombstone_block(ledger.num_blocks().unwrap());
+
+        sci_builder3
+            .add_required_output(
+                Amount::new(calc_fee_amount(20, 10), pair.counter_token_id),
+                &test_context.fee_account.default_subaddress(),
+                &mut rng,
+            )
+            .unwrap();
+
         let sci3 = sci_builder3.build(&NoKeysRingSigner {}, &mut rng).unwrap();
 
         let quote3 = synchronized_quote_book.add_sci(sci3, None).unwrap();
@@ -595,6 +667,15 @@ mod tests {
         let mut sci_builder4 =
             test_suite::create_sci_builder(&pair, 10, 20, &mut rng, Some(&test_context.ledger));
         sci_builder4.set_tombstone_block(ledger.num_blocks().unwrap() - 1);
+
+        sci_builder4
+            .add_required_output(
+                Amount::new(calc_fee_amount(20, 10), pair.counter_token_id),
+                &test_context.fee_account.default_subaddress(),
+                &mut rng,
+            )
+            .unwrap();
+
         let sci4 = sci_builder4.build(&NoKeysRingSigner {}, &mut rng).unwrap();
 
         assert_eq!(
@@ -620,6 +701,15 @@ mod tests {
         // added to the ledger.
         assert_eq!(ledger.num_blocks().unwrap(), starting_blocks + 1);
         sci_builder.set_tombstone_block(ledger.num_blocks().unwrap());
+
+        sci_builder
+            .add_required_output(
+                Amount::new(calc_fee_amount(20, 10), pair.counter_token_id),
+                &test_context.fee_account.default_subaddress(),
+                &mut rng,
+            )
+            .unwrap();
+
         let sci = sci_builder.build(&NoKeysRingSigner {}, &mut rng).unwrap();
 
         let quote = synchronized_quote_book.add_sci(sci, None).unwrap();
@@ -677,11 +767,19 @@ mod tests {
 
         // Adding an SCI with TXOs not in the ledger should fail if the sci_builder does
         // not add the txos used by the sci into the ledger.
-        let sci_builder = test_suite::create_sci_builder(&pair, 10, 20, &mut rng, None);
+        let sci = test_suite::create_sci(
+            &pair,
+            10,
+            20,
+            &test_context.fee_account.default_subaddress(),
+            10,
+            &mut rng,
+            None,
+        );
+
         // Number of blocks has not advanced because the TXOs being used by this SCI
         // were not added to the ledger.
         assert_eq!(ledger.num_blocks().unwrap(), starting_blocks);
-        let sci = sci_builder.build(&NoKeysRingSigner {}, &mut rng).unwrap();
 
         assert_eq!(
             synchronized_quote_book.add_sci(sci, None).unwrap_err(),
@@ -695,12 +793,18 @@ mod tests {
 
         // Adding an SCI with txos in the ledger should succeed. The sci_builder adds
         // the txos used by the SCI into the ledger.
-        let sci_builder2 =
-            test_suite::create_sci_builder(&pair, 10, 20, &mut rng, Some(&test_context.ledger));
+        let sci2 = test_suite::create_sci(
+            &pair,
+            10,
+            20,
+            &test_context.fee_account.default_subaddress(),
+            10,
+            &mut rng,
+            Some(&test_context.ledger),
+        );
         // Number of blocks has advanced because the TXOs being used by this SCI were
         // added to the ledger.
         assert_eq!(ledger.num_blocks().unwrap(), starting_blocks + 1);
-        let sci2 = sci_builder2.build(&NoKeysRingSigner {}, &mut rng).unwrap();
 
         let quote = synchronized_quote_book.add_sci(sci2, None).unwrap();
 

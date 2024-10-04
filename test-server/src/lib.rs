@@ -7,7 +7,10 @@ mod client_service;
 
 use client_service::ClientService;
 use deqs_api::{
-    deqs::{GetQuotesRequest, GetQuotesResponse, SubmitQuotesRequest, SubmitQuotesResponse},
+    deqs::{
+        GetConfigResponse, GetQuotesRequest, GetQuotesResponse, SubmitQuotesRequest,
+        SubmitQuotesResponse,
+    },
     deqs_grpc::DeqsClientApiClient,
     DeqsClientUri,
 };
@@ -83,6 +86,10 @@ impl DeqsTestServer {
             .unwrap()
             .drain(..)
             .collect()
+    }
+
+    pub fn set_config_response(&self, resp: Result<GetConfigResponse, RpcStatus>) {
+        *self.client_service.get_config_response.lock().unwrap() = resp;
     }
 
     pub fn client_uri(&self) -> DeqsClientUri {

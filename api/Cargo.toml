@@ -22,6 +22,8 @@ rand = "0.8" # TODO something needs to enable the default features on rand, and 
 [dev-dependencies]
 deqs-mc-test-utils  = { path = "../mc-test-utils" }
 
+mc-account-keys = { path = "../mobilecoin/account-keys" }
+
 [build-dependencies]
 mc-util-build-grpc = { path = "../mobilecoin/util/build/grpc" }
 mc-util-build-script = { path = "../mobilecoin/util/build/script" }

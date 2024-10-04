@@ -4,7 +4,7 @@ mod metrics;
 mod rpc;
 mod rpc_error;
 
-pub use metrics::P2PRpcMetrics;
+pub use metrics::{P2PRequestResponseMetrics, P2P_GOSSIP_METRICS, P2P_RPC_METRICS};
 pub use rpc_error::{RpcError, RpcQuoteBookError};
 
 use crate::Error;
@@ -24,8 +24,6 @@ use rpc::{Request, Response, RpcClient};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use tokio::sync::mpsc::UnboundedReceiver;
-
-use self::metrics::P2P_RPC_METRICS;
 
 /// Gossip topic for message-bus traffic.
 const MSG_BUS_TOPIC: &str = "mc/deqs/server/msg-bus";
@@ -223,7 +221,7 @@ impl<QB: QuoteBook> P2P<QB> {
             }
         };
 
-        P2P_RPC_METRICS.resp(method_name, &response);
+        P2P_RPC_METRICS.resp(&method_name, &response);
 
         self.client.rpc_response(response, channel).await?;
 
@@ -247,9 +245,14 @@ impl<QB: QuoteBook> P2P<QB> {
 
     /// Handle a gossip message on the message bus topic.
     async fn handle_msg_bus_message(&mut self, msg: GossipMsgBusData) -> Result<(), Error> {
-        match msg {
+        let (_timer, method_name) = P2P_GOSSIP_METRICS.req(&msg);
+        let response = match msg {
             GossipMsgBusData::SciQuoteAdded(quote) => self.handle_sci_quote_added(quote).await,
-        }
+        };
+
+        P2P_GOSSIP_METRICS.resp(&method_name, &response);
+
+        response
     }
 
     /// Handle a message on the message bus topic: a new quote has beeen added

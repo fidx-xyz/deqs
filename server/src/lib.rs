@@ -15,5 +15,5 @@ pub use error::Error;
 pub use grpc_server::GrpcServer;
 pub use metrics::{update_periodic_metrics, METRICS_POLL_INTERVAL, SVC_COUNTERS};
 pub use msg::Msg;
-pub use p2p::P2P;
+pub use p2p::{P2P, P2P_GOSSIP_METRICS, P2P_RPC_METRICS};
 pub use server::Server;
