@@ -53,6 +53,7 @@ impl TryFrom<&api::Quote> for Quote {
 mod tests {
     use super::*;
     use deqs_mc_test_utils::create_sci;
+    use mc_account_keys::AccountKey;
     use mc_transaction_types::TokenId;
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -60,15 +61,19 @@ mod tests {
     // Quote --> api::Quote --> Quote
     fn test_quote_identity() {
         let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+        let fee_account = AccountKey::random(&mut rng);
+
         let sci = create_sci(
             TokenId::from(43432),
             TokenId::from(6886868),
             10,
             30,
+            &fee_account.default_subaddress(),
+            1,
             &mut rng,
             None,
         );
-        let source = Quote::try_from(sci).unwrap();
+        let source = Quote::new(sci, None, fee_account.view_private_key(), 10).unwrap();
 
         let converted = api::Quote::from(&source);
         let recovererd = Quote::try_from(&converted).unwrap();

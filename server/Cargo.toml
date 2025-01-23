@@ -20,13 +20,16 @@ deqs-quote-book-api = { path = "../quote-book/api" }
 deqs-quote-book-in-memory = { path = "../quote-book/in-memory" }
 deqs-quote-book-sqlite = { path = "../quote-book/sqlite" }
 deqs-quote-book-synchronized = { path = "../quote-book/synchronized" }
+mc-account-keys = { path = "../mobilecoin/account-keys" }
 mc-api = { path = "../mobilecoin/api" }
 mc-common = { path = "../mobilecoin/common", features = ["loggers"] }
+mc-crypto-keys = { path = "../mobilecoin/crypto/keys" }
 mc-ledger-db = { path = "../mobilecoin/ledger/db" }
 mc-transaction-extra = { path = "../mobilecoin/transaction/extra" }
 mc-transaction-types = { path = "../mobilecoin/transaction/types" }
 mc-util-grpc = { path = "../mobilecoin/util/grpc" }
 mc-util-metrics  = { path = "../mobilecoin/util/metrics" }
+mc-util-parse = { path = "../mobilecoin/util/parse" }
 mc-util-serial = { path = "../mobilecoin/util/serial" }
 mc-util-uri = { path = "../mobilecoin/util/uri" }
 

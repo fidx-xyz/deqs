@@ -1,42 +1,47 @@
 // Copyright (c) 2023 MobileCoin Inc.
 
-use super::rpc::{Request, Response};
+use super::{
+    rpc::{Request, Response},
+    GossipMsgBusData,
+};
 use mc_util_metrics::{
     Collector, Desc, HistogramOpts, HistogramVec, IntCounterVec, MetricFamily, Opts,
 };
 use prometheus::HistogramTimer;
 
 lazy_static::lazy_static! {
-    pub static ref P2P_RPC_METRICS: P2PRpcMetrics = P2PRpcMetrics::default();
+    pub static ref P2P_RPC_METRICS: P2PRequestResponseMetrics = P2PRequestResponseMetrics::default();
+    pub static ref P2P_GOSSIP_METRICS: P2PRequestResponseMetrics = P2PRequestResponseMetrics::default();
 }
 
-/// `P2PRpcMetrics` is a metric [`Collector`](prometheus::core::Collector) to
-/// capture key metrics about a P2P RPC calls
+/// `P2PRequestResponseMetrics` is a metric
+/// [`Collector`](prometheus::core::Collector) to capture key metrics about a
+/// P2P RPC or Gossip calls
 ///
 /// This is based on `mobilecoin/util/metrics/src/service_metrics.rs`.
 #[derive(Clone)]
-pub struct P2PRpcMetrics {
+pub struct P2PRequestResponseMetrics {
     /// Count of requests received by each RPC method tracked
-    num_req: IntCounterVec,
+    pub num_req: IntCounterVec,
 
     /// Count of success responses for each RPC method tracked
-    num_success: IntCounterVec,
+    pub num_success: IntCounterVec,
 
     /// Count of error responses for each RPC method tracked
-    num_error: IntCounterVec,
+    pub num_error: IntCounterVec,
 
     /// Duration of RPC method calls tracked
-    duration: HistogramVec,
+    pub duration: HistogramVec,
 }
-impl Default for P2PRpcMetrics {
+impl Default for P2PRequestResponseMetrics {
     fn default() -> Self {
-        P2PRpcMetrics::new_and_registered("deqs_server_p2p_rpc")
+        P2PRequestResponseMetrics::new_and_registered("deqs_server_p2p_rpc")
     }
 }
 
-impl P2PRpcMetrics {
+impl P2PRequestResponseMetrics {
     /// Create a default constructor that initializes all metrics
-    pub fn new<S: Into<String>>(name: S) -> P2PRpcMetrics {
+    pub fn new<S: Into<String>>(name: S) -> P2PRequestResponseMetrics {
         let name_str = name.into();
 
         Self {
@@ -67,7 +72,7 @@ impl P2PRpcMetrics {
     }
 }
 
-impl P2PRpcMetrics {
+impl P2PRequestResponseMetrics {
     /// Register Prometheus metrics family
     pub fn new_and_registered<S: Into<String>>(name: S) -> Self {
         let svc = Self::new(name);
@@ -78,14 +83,14 @@ impl P2PRpcMetrics {
     /// Takes the RpcContext used during a gRPC method call to get the method
     /// name and increments counters tracking the number of calls to and
     /// returns a counter to track the duration of the method
-    pub fn req(&self, req: &Request) -> (HistogramTimer, &'static str) {
-        let method_name = req.metrics_method_name();
+    pub fn req(&self, req: &impl MethodNameExtractor) -> (HistogramTimer, String) {
+        let method_name = req.get_method_name();
 
-        self.num_req.with_label_values(&[method_name]).inc();
+        self.num_req.with_label_values(&[&method_name]).inc();
 
         (
             self.duration
-                .with_label_values(&[method_name])
+                .with_label_values(&[&method_name])
                 .start_timer(),
             method_name,
         )
@@ -94,8 +99,8 @@ impl P2PRpcMetrics {
     /// Takes the RpcContext used during a gRPC method call to get the method
     /// name and increments an error counter if the method resulted in an
     /// error
-    pub fn resp(&self, method_name: &'static str, resp: &Response) {
-        if let Response::Error(_) = resp {
+    pub fn resp(&self, method_name: &str, resp: &impl IsErrorResponse) {
+        if resp.is_error_response() {
             self.num_error.with_label_values(&[method_name]).inc_by(1);
         } else {
             self.num_success.with_label_values(&[method_name]).inc_by(1);
@@ -103,7 +108,7 @@ impl P2PRpcMetrics {
     }
 }
 
-impl Collector for P2PRpcMetrics {
+impl Collector for P2PRequestResponseMetrics {
     /// Collect metric descriptions for Prometheus
     fn desc(&self) -> Vec<&Desc> {
         // order: num_req, num_error, duration
@@ -132,5 +137,43 @@ impl Collector for P2PRpcMetrics {
             l.extend(v);
             l
         })
+    }
+}
+
+/// A helper trait for getting the method name - this allows us to generalize
+/// the metrics object over RPC and Gossip requests
+pub trait MethodNameExtractor {
+    fn get_method_name(&self) -> String;
+}
+
+impl MethodNameExtractor for Request {
+    fn get_method_name(&self) -> String {
+        self.metrics_method_name().to_string()
+    }
+}
+
+impl MethodNameExtractor for GossipMsgBusData {
+    fn get_method_name(&self) -> String {
+        match self {
+            Self::SciQuoteAdded(_) => "SciQuoteAdded".to_string(),
+        }
+    }
+}
+
+/// A helper trait for telling is a response is an error - this allows us to
+/// generalize the metrics object over RPC and Gossip responses
+pub trait IsErrorResponse {
+    fn is_error_response(&self) -> bool;
+}
+
+impl IsErrorResponse for Response {
+    fn is_error_response(&self) -> bool {
+        matches!(self, Response::Error(_))
+    }
+}
+
+impl<R, E> IsErrorResponse for Result<R, E> {
+    fn is_error_response(&self) -> bool {
+        self.is_err()
     }
 }

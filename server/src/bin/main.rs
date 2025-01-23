@@ -2,11 +2,13 @@
 
 use clap::Parser;
 use deqs_p2p::libp2p::identity::Keypair;
+use deqs_quote_book_api::FeeConfig;
 use deqs_quote_book_in_memory::InMemoryQuoteBook;
 use deqs_quote_book_sqlite::SqliteQuoteBook;
 use deqs_quote_book_synchronized::{RemoveQuoteCallback, SynchronizedQuoteBook};
 use deqs_server::{Msg, Server, ServerConfig};
 use mc_common::logger::o;
+use mc_crypto_keys::RistrettoPublic;
 use mc_ledger_db::{Ledger, LedgerDB};
 use mc_util_grpc::AdminServer;
 use postage::broadcast;
@@ -19,6 +21,13 @@ const MSG_BUS_QUEUE_SIZE: usize = 1000;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _sentry_guard = mc_common::sentry::init();
     let config = ServerConfig::parse();
+
+    if *config.fee_b58_address.view_public_key()
+        != RistrettoPublic::from(&config.fee_private_view_key)
+    {
+        panic!("The fee private view key does not match the public view key in the fee B58 address")
+    }
+
     let (logger, _global_logger_guard) = mc_common::logger::create_app_logger(o!());
     mc_common::setup_panic_handler();
 
@@ -50,7 +59,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let internal_quote_book = SqliteQuoteBook::new_from_file_path(
         &config.db_path,
         10,
-        InMemoryQuoteBook::default(),
+        InMemoryQuoteBook::new(FeeConfig {
+            fee_address: config.fee_b58_address.clone(),
+            fee_basis_points: config.fee_basis_points,
+            fee_view_private_key: config.fee_private_view_key,
+        }),
         logger.clone(),
     )
     .expect("failed initializing database");
@@ -62,7 +75,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Start admin server
-    let config_json = serde_json::to_string(&config).expect("failed to serialize config to JSON");
+    let config_json = serde_json::to_string(&serde_json::json!({
+        "db_path": config.db_path,
+        "client_listen_uri": config.client_listen_uri,
+        "admin_listen_uri": config.admin_listen_uri,
+        "ledger_db": config.ledger_db,
+        "p2p_bootstrap_peers": config.p2p_bootstrap_peers,
+        "p2p_listen": config.p2p_listen,
+        "p2p_external_address": config.p2p_external_address,
+        "p2p_keypair_path": config.p2p_keypair_path,
+        "quote_minimum_map": config.quote_minimum_map,
+        "fee_b58_address": config.fee_b58_address,
+        "fee_basis_points": config.fee_basis_points,
+    }))
+    .expect("failed to serialize config to JSON");
     let get_config_json = Arc::new(move || Ok(config_json.clone()));
     let id = config.client_listen_uri.to_string();
     let _admin_server = config.admin_listen_uri.as_ref().map(|admin_listen_uri| {

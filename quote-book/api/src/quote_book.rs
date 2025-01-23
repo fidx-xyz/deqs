@@ -2,12 +2,24 @@
 
 use crate::{Error, Pair, Quote, QuoteId};
 use mc_blockchain_types::BlockIndex;
+use mc_crypto_keys::RistrettoPrivate;
 use mc_crypto_ring_signature::KeyImage;
+use mc_transaction_core::PublicAddress;
 use mc_transaction_extra::SignedContingentInput;
 use std::ops::RangeBounds;
 
-/// Quote book functionality for a single trading pair
+/// Quote book - an object for managing a collection of quotes
 pub trait QuoteBook: Clone + Send + Sync + 'static {
+    /// The public address this quote book expects fees at
+    fn fee_address(&self) -> PublicAddress;
+
+    /// The number of basis points each quote needs to pay the fee address.
+    fn fee_basis_points(&self) -> u16;
+
+    /// The private view key of the fee address.
+    /// This is needed to make the interface of `add_sci` more ergonomic.
+    fn fee_view_private_key(&self) -> RistrettoPrivate;
+
     /// Add an SCI to the quote book.
     ///
     /// # Arguments
@@ -17,7 +29,12 @@ pub trait QuoteBook: Clone + Send + Sync + 'static {
     #[allow(clippy::result_large_err)]
     fn add_sci(&self, sci: SignedContingentInput, timestamp: Option<u64>) -> Result<Quote, Error> {
         // Convert SCI into an quote. This also validates it.
-        let quote = Quote::new(sci, timestamp)?;
+        let quote = Quote::new(
+            sci,
+            timestamp,
+            &self.fee_view_private_key(),
+            self.fee_basis_points(),
+        )?;
         self.add_quote(&quote)?;
         Ok(quote)
     }

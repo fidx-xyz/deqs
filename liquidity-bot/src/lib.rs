@@ -20,11 +20,11 @@ pub use error::Error;
 pub use metrics::{update_periodic_metrics, METRICS_POLL_INTERVAL};
 
 use deqs_api::{
-    deqs::{QuoteStatusCode, SubmitQuotesRequest, SubmitQuotesResponse},
+    deqs::{GetConfigResponse, QuoteStatusCode, SubmitQuotesRequest, SubmitQuotesResponse},
     deqs_grpc::DeqsClientApiClient,
     DeqsClientUri,
 };
-use deqs_quote_book_api::Quote;
+use deqs_quote_book_api::{calc_fee_amount, Quote};
 use futures::executor::block_on;
 use grpcio::{ChannelBuilder, EnvBuilder};
 use mc_common::logger::{log, Logger};
@@ -219,6 +219,12 @@ struct LiquidityBotTask {
 
     /// DEQS client.
     deqs_client: DeqsClientApiClient,
+
+    /// The DEQS server configuration.
+    /// Right now we cache this under the assumption the DEQS configuration
+    /// doesn't change too frequently, and when it does we can restart the
+    /// bot.
+    deqs_config: Option<GetConfigResponse>,
 }
 
 impl LiquidityBotTask {
@@ -229,6 +235,23 @@ impl LiquidityBotTask {
         resubmit_tx_outs_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            if self.deqs_config.is_none() {
+                log::info!(self.logger, "Trying to get DEQS server config");
+
+                match self.update_deqs_config().await {
+                    Ok(()) => {
+                        log::info!(
+                            self.logger,
+                            "Got config from DEQS, fee_basis_points={}",
+                            self.deqs_config.as_ref().unwrap().fee_basis_points,
+                        );
+                    }
+                    Err(err) => {
+                        log::error!(self.logger, "Failed getting config from DEQS: {err}");
+                    }
+                }
+            }
+
             tokio::select! {
                 event = self.command_rx.recv() => {
                     match event {
@@ -349,20 +372,30 @@ impl LiquidityBotTask {
             let num_partial_fill_outputs = partial_fill_outputs
                 .map(|partial_fill_outputs| partial_fill_outputs.len())
                 .unwrap_or(0);
-            if num_partial_fill_outputs != 1 {
+            if num_partial_fill_outputs != 2 {
                 // At the moment, `create_pending_tx_out`, which generates the SCI, always
-                // creates SCIs with a single partial fill output.
-                log::warn!(self.logger, "Somehow ended up with a spent listed TxOut {} without exactly one partial fill output.", listed_tx_out.matched_tx_out.tx_out.public_key);
+                // creates SCIs with a two partial fill outputs.
+                log::warn!(self.logger, "Somehow ended up with a spent listed TxOut {} without exactly two partial fill outputs.", listed_tx_out.matched_tx_out.tx_out.public_key);
                 continue;
             }
 
-            let partial_fill_output = &partial_fill_outputs.unwrap()[0];
-
-            // See if the partial fill output is included in this block, if it is then it
-            // implies the SCI was consumed.
-            let received_counter_output = received_tx_outs
+            // See if the partial output that paid us was included in the block.
+            // The SCI is known to have two partial outputs, one pays us back and one pays
+            // the DEQS fees. We don't care if the DEQS fee partial output made
+            // it into the block, our assumption here that an SCI was consumed if:
+            // 1. The TxOut provided by the SCI appeared in the block
+            // 2. One of the partial tx outs in the SCI has paid our wallet in the same back
+            let partial_fill_output_and_received_counter_output = partial_fill_outputs
+                .expect("can't be empty since we checked the length above")
                 .iter()
-                .find(|mtxo| mtxo.tx_out.public_key == partial_fill_output.tx_out.public_key);
+                .find_map(|partial_fill_output| {
+                    let received_counter_output = received_tx_outs.iter().find(|mtxo| {
+                        mtxo.tx_out.public_key == partial_fill_output.tx_out.public_key
+                    });
+                    received_counter_output.map(|received_counter_output| {
+                        (partial_fill_output, received_counter_output.clone())
+                    })
+                });
 
             // There might be a change output holding whatever wasn't consumed from the
             // input the SCI was offering. This will happen for partial SCIs.
@@ -388,8 +421,8 @@ impl LiquidityBotTask {
                 );
             }
 
-            match received_counter_output.cloned() {
-                Some(received_counter_output) => {
+            match partial_fill_output_and_received_counter_output {
+                Some((partial_fill_output, received_counter_output)) => {
                     let fulfilled_sci = FulfilledSci {
                         requested_counter_output: partial_fill_output.clone(),
                         listed_tx_out: listed_tx_out.clone(),
@@ -673,6 +706,12 @@ impl LiquidityBotTask {
     }
 
     fn create_pending_tx_out(&self, matched_tx_out: MatchedTxOut) -> Result<PendingTxOut, Error> {
+        let deqs_config = self
+            .deqs_config
+            .as_ref()
+            .ok_or(Error::MissingDeqsServerConfig)?;
+        let fee_address = deqs_config.get_fee_address().try_into()?;
+
         let (counter_token_id, swap_rate) = self
             .pairs
             .get(&matched_tx_out.amount.token_id)
@@ -755,6 +794,14 @@ impl LiquidityBotTask {
             &ReservedSubaddresses::from(&self.account_key),
             &mut rng,
         )?;
+        builder.add_partial_fill_output(
+            Amount::new(
+                calc_fee_amount(counter_amount, deqs_config.fee_basis_points as u16),
+                *counter_token_id,
+            ),
+            &fee_address,
+            &mut rng,
+        )?;
         let sci = builder.build(&LocalRingSigner::from(&self.account_key), &mut rng)?;
 
         Ok(PendingTxOut {
@@ -785,6 +832,24 @@ impl LiquidityBotTask {
         metrics::SUBMIT_QUOTES_GRPC_SUCCESS.observe(start.elapsed().as_secs_f64());
 
         Ok(resp)
+    }
+
+    async fn update_deqs_config(&mut self) -> Result<(), Error> {
+        let start = Instant::now();
+        self.deqs_config = Some(
+            self.deqs_client
+                .get_config_async(&Default::default())
+                .map_err(|err| {
+                    metrics::GET_CONFIG_GRPC_FAIL.observe(start.elapsed().as_secs_f64());
+                    err
+                })?
+                .await
+                .map_err(|err| {
+                    metrics::GET_CONFIG_GRPC_FAIL.observe(start.elapsed().as_secs_f64());
+                    err
+                })?,
+        );
+        Ok(())
     }
 }
 
@@ -871,6 +936,7 @@ impl LiquidityBot {
             shutdown_rx,
             shutdown_ack_tx: Some(shutdown_ack_tx),
             logger,
+            deqs_config: None,
         };
         tokio::spawn(task.run());
         Self {
@@ -935,7 +1001,7 @@ mod tests {
 
     use super::*;
     use deqs_api::deqs as grpc_api;
-    use deqs_quote_book_api::Quote;
+    use deqs_quote_book_api::{FeeConfig, Quote};
     use deqs_test_server::DeqsTestServer;
     use mc_common::logger::{async_test_with_logger, Logger};
     use mc_crypto_ring_signature_signer::NoKeysRingSigner;
@@ -953,12 +1019,22 @@ mod tests {
         task: LiquidityBotTask,
         ledger_db: LedgerDB,
         account_key: AccountKey,
+        fee_config: FeeConfig,
         rng: StdRng,
     }
     impl TestContext {
         pub fn new(pairs: &[(TokenId, TokenId, Decimal)], logger: &Logger) -> Self {
-            let mut rng: StdRng = SeedableRng::from_seed([1u8; 32]);
+            // We use a different seed here than in most other tests so that our fee account
+            // does not end up being the same as any other accounts.
+            let mut rng: StdRng = SeedableRng::from_seed([251u8; 32]);
             let account_key = AccountKey::random(&mut rng);
+            let fee_account = AccountKey::random(&mut rng);
+
+            let fee_config = FeeConfig {
+                fee_address: fee_account.default_subaddress(),
+                fee_basis_points: 20,
+                fee_view_private_key: *fee_account.view_private_key(),
+            };
 
             let mut ledger_db = create_ledger();
             let n_blocks = 3;
@@ -977,6 +1053,11 @@ mod tests {
             let (_shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
             let (shutdown_ack_tx, _shutdown_ack_rx) = mpsc::unbounded_channel();
 
+            let mut config_response = GetConfigResponse::default();
+            config_response.set_fee_address((&fee_config.fee_address).into());
+            config_response.set_fee_basis_points(fee_config.fee_basis_points as u32);
+            deqs_server.set_config_response(Ok(config_response.clone()));
+
             let pairs = pairs
                 .iter()
                 .map(|(base_token, counter_token, rate)| (*base_token, (*counter_token, *rate)))
@@ -993,6 +1074,7 @@ mod tests {
                 shutdown_rx,
                 shutdown_ack_tx: Some(shutdown_ack_tx),
                 logger: logger.clone(),
+                deqs_config: Some(config_response),
             };
 
             Self {
@@ -1000,6 +1082,7 @@ mod tests {
                 task,
                 ledger_db,
                 account_key,
+                fee_config,
                 rng,
             }
         }
@@ -1073,14 +1156,25 @@ mod tests {
             assert!(sci.tx_in.ring.contains(&matched_tx_outs[idx].tx_out));
 
             let input_rules = sci.tx_in.input_rules.as_ref().unwrap();
-            assert_eq!(input_rules.partial_fill_outputs.len(), 1);
-            let (partial_fill_amount, _) =
-                input_rules.partial_fill_outputs[0].reveal_amount().unwrap();
-            assert_eq!(partial_fill_amount.token_id, *expected_token_id);
-            assert_eq!(
-                Decimal::from(partial_fill_amount.value),
-                *expected_partial_amount
-            );
+            assert_eq!(input_rules.partial_fill_outputs.len(), 2);
+
+            // One amount should be our counter amount, one should be a fee percentage of
+            // it.
+            let (amount0, _) = input_rules.partial_fill_outputs[0].reveal_amount().unwrap();
+            let (amount1, _) = input_rules.partial_fill_outputs[1].reveal_amount().unwrap();
+
+            assert_eq!(amount0.token_id, *expected_token_id);
+            assert_eq!(amount1.token_id, *expected_token_id);
+
+            // Sort to make this test immune from the order of the outputs in the SCI
+            let mut amounts = [Decimal::from(amount0.value), Decimal::from(amount1.value)];
+            amounts.sort();
+
+            let expected_fee_amount = (expected_partial_amount
+                * Decimal::new(test_ctx.fee_config.fee_basis_points as i64, 4))
+            .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToPositiveInfinity);
+
+            assert_eq!(amounts, [expected_fee_amount, *expected_partial_amount]);
         }
 
         // Calling update_pending_tx_outs_from_received_tx_outs with just TxOuts for
@@ -1156,8 +1250,20 @@ mod tests {
         let mtxo = test_ctx.create_matched_tx_out(Amount::new(100, TokenId::from(1)));
         let ptxo = test_ctx.task.create_pending_tx_out(mtxo).unwrap();
 
-        let quote1 = Quote::new(test_ctx.task.pending_tx_outs[0].sci.clone(), None).unwrap();
-        let quote2 = Quote::new(ptxo.sci, None).unwrap();
+        let quote1 = Quote::new(
+            test_ctx.task.pending_tx_outs[0].sci.clone(),
+            None,
+            &test_ctx.fee_config.fee_view_private_key,
+            test_ctx.fee_config.fee_basis_points,
+        )
+        .unwrap();
+        let quote2 = Quote::new(
+            ptxo.sci,
+            None,
+            &test_ctx.fee_config.fee_view_private_key,
+            test_ctx.fee_config.fee_basis_points,
+        )
+        .unwrap();
 
         let resp = SubmitQuotesResponse {
             status_codes: vec![
@@ -1240,7 +1346,13 @@ mod tests {
             .iter()
             .map(|mtxo| {
                 let ptxo = test_ctx.task.create_pending_tx_out(mtxo.clone()).unwrap();
-                let quote = Quote::new(ptxo.sci, None).unwrap();
+                let quote = Quote::new(
+                    ptxo.sci,
+                    None,
+                    &test_ctx.fee_config.fee_view_private_key,
+                    test_ctx.fee_config.fee_basis_points,
+                )
+                .unwrap();
                 ListedTxOut {
                     matched_tx_out: mtxo.clone(),
                     quote,
@@ -1271,7 +1383,13 @@ mod tests {
         test_ctx.task.listed_tx_outs = pending_tx_outs
             .iter()
             .map(|ptxo| {
-                let quote = Quote::new(ptxo.sci.clone(), None).unwrap();
+                let quote = Quote::new(
+                    ptxo.sci.clone(),
+                    None,
+                    &test_ctx.fee_config.fee_view_private_key,
+                    test_ctx.fee_config.fee_basis_points,
+                )
+                .unwrap();
                 ListedTxOut {
                     matched_tx_out: ptxo.matched_tx_out.clone(),
                     quote,
@@ -1350,7 +1468,13 @@ mod tests {
         // last_submitted_at value.
         let mtxo = test_ctx.create_matched_tx_out(Amount::new(100, TokenId::MOB));
         let ptxo = test_ctx.task.create_pending_tx_out(mtxo).unwrap();
-        let quote = Quote::new(ptxo.sci, None).unwrap();
+        let quote = Quote::new(
+            ptxo.sci,
+            None,
+            &test_ctx.fee_config.fee_view_private_key,
+            test_ctx.fee_config.fee_basis_points,
+        )
+        .unwrap();
 
         let resp = SubmitQuotesResponse {
             status_codes: vec![QuoteStatusCode::QUOTE_ALREADY_EXISTS],
@@ -1444,16 +1568,34 @@ mod tests {
             let mtxo = test_ctx.create_matched_tx_out(Amount::new(mob_amount, TokenId::MOB));
             let ptxo = test_ctx.task.create_pending_tx_out(mtxo).unwrap();
 
-            let (amount, _) = ptxo
-                .sci
-                .tx_in
-                .input_rules
-                .as_ref()
-                .unwrap()
-                .partial_fill_outputs[0]
-                .reveal_amount()
-                .unwrap();
-            assert_eq!(amount, Amount::new(expected_eusd_amount, TokenId::from(1)));
+            let mut amounts = (0..=1)
+                .map(|idx| {
+                    let (amount, _) = ptxo
+                        .sci
+                        .tx_in
+                        .input_rules
+                        .as_ref()
+                        .unwrap()
+                        .partial_fill_outputs[idx]
+                        .reveal_amount()
+                        .unwrap();
+
+                    assert_eq!(amount.token_id, TokenId::from(1));
+
+                    amount.value
+                })
+                .collect::<Vec<_>>();
+
+            // Sort to make this test immune from the order of the outputs in the SCI
+            amounts.sort();
+
+            assert_eq!(
+                amounts,
+                [
+                    calc_fee_amount(expected_eusd_amount, test_ctx.fee_config.fee_basis_points),
+                    expected_eusd_amount,
+                ]
+            );
         }
 
         //  eUSD (token id 1) -> MOB ratio is 1:3 (see default_pairs())
@@ -1461,16 +1603,33 @@ mod tests {
             let mtxo = test_ctx.create_matched_tx_out(Amount::new(eusd_amount, TokenId::from(1)));
             let ptxo = test_ctx.task.create_pending_tx_out(mtxo).unwrap();
 
-            let (amount, _) = ptxo
-                .sci
-                .tx_in
-                .input_rules
-                .as_ref()
-                .unwrap()
-                .partial_fill_outputs[0]
-                .reveal_amount()
-                .unwrap();
-            assert_eq!(amount, Amount::new(expected_mob_amount, TokenId::MOB));
+            let mut amounts = (0..=1)
+                .map(|idx| {
+                    let (amount, _) = ptxo
+                        .sci
+                        .tx_in
+                        .input_rules
+                        .as_ref()
+                        .unwrap()
+                        .partial_fill_outputs[idx]
+                        .reveal_amount()
+                        .unwrap();
+
+                    assert_eq!(amount.token_id, TokenId::MOB);
+                    amount.value
+                })
+                .collect::<Vec<_>>();
+
+            // Sort to make this test immune from the order of the outputs in the SCI
+            amounts.sort();
+
+            assert_eq!(
+                amounts,
+                [
+                    calc_fee_amount(expected_mob_amount, test_ctx.fee_config.fee_basis_points),
+                    expected_mob_amount,
+                ]
+            );
         }
 
         // Try a conversion that overflows u64
@@ -1496,7 +1655,13 @@ mod tests {
             .update_pending_tx_outs_from_received_tx_outs(&[mtxo.clone()])
             .unwrap());
 
-        let quote = Quote::new(test_ctx.task.pending_tx_outs[0].sci.clone(), None).unwrap();
+        let quote = Quote::new(
+            test_ctx.task.pending_tx_outs[0].sci.clone(),
+            None,
+            &test_ctx.fee_config.fee_view_private_key,
+            test_ctx.fee_config.fee_basis_points,
+        )
+        .unwrap();
         let resp = SubmitQuotesResponse {
             status_codes: vec![QuoteStatusCode::CREATED],
             quotes: vec![grpc_api::Quote::from(&quote)].into(),
@@ -1543,7 +1708,13 @@ mod tests {
             .update_pending_tx_outs_from_received_tx_outs(&[mtxo.clone()])
             .unwrap());
 
-        let quote = Quote::new(test_ctx.task.pending_tx_outs[0].sci.clone(), None).unwrap();
+        let quote = Quote::new(
+            test_ctx.task.pending_tx_outs[0].sci.clone(),
+            None,
+            &test_ctx.fee_config.fee_view_private_key,
+            test_ctx.fee_config.fee_basis_points,
+        )
+        .unwrap();
         let resp = SubmitQuotesResponse {
             status_codes: vec![QuoteStatusCode::CREATED],
             quotes: vec![grpc_api::Quote::from(&quote)].into(),
@@ -1574,7 +1745,7 @@ mod tests {
         // Try again with a real tx that consumes the SCI.
         // Create a transaction that consumes a quarter of the SCI sending half of that
         // in eUSD (the sci's ratio is 1 mob = 0.5 eusd)
-        // To keep things a bit simpler, we use a fee value of 0
+        // To keep things a bit simpler, we use a network fee value of 0
         let tx = {
             let mut sci = listed_tx_out.quote.sci().clone();
 
@@ -1583,9 +1754,16 @@ mod tests {
 
             let mob_amount_to_consume = mob_value_offered / 4;
 
+            let eusd_amount = mob_amount_to_consume / 2; // based on the 1 mob=0.5eusd ratio
+            let deqs_fee = calc_fee_amount(eusd_amount, test_ctx.fee_config.fee_basis_points);
+
             let input_credentials = get_input_credentials(
                 BlockVersion::MAX,
-                Amount::new(mob_amount_to_consume / 2, TokenId::from(1)),
+                Amount::new(
+                    // TODO
+                    eusd_amount + deqs_fee,
+                    TokenId::from(1),
+                ),
                 &counterparty,
                 &fog_resolver,
                 &mut test_ctx.rng,

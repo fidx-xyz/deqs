@@ -30,6 +30,9 @@ lazy_static::lazy_static! {
 
    /// Failed SubmitQuotes GRPC calls histogram
    pub static ref SUBMIT_QUOTES_GRPC_FAIL: Histogram = OP_COUNTERS.histogram("submit_quotes_grpc_fail");
+
+   /// Failed GetConfig GRPC calls histogram
+   pub static ref GET_CONFIG_GRPC_FAIL: Histogram = OP_COUNTERS.histogram("get_config_grpc_fail");
 }
 
 /// Update periodic metrics.

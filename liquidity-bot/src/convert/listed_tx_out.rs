@@ -29,7 +29,7 @@ impl TryFrom<&api::ListedTxOut> for ListedTxOut {
 mod tests {
     use super::*;
     use crate::mini_wallet::MatchedTxOut;
-    use deqs_quote_book_api::Quote;
+    use deqs_quote_book_api::{calc_fee_amount, FeeConfig, Quote};
     use mc_account_keys::{AccountKey, PublicAddress};
     use mc_blockchain_types::BlockVersion;
     use mc_crypto_keys::RistrettoPrivate;
@@ -49,6 +49,12 @@ mod tests {
         let charlie = AccountKey::random(&mut rng);
         let token2 = TokenId::from(2);
         let fpr = MockFogResolver::default();
+        let fee_account = AccountKey::random(&mut rng);
+        let fee_config = FeeConfig {
+            fee_address: fee_account.default_subaddress(),
+            fee_basis_points: 20,
+            fee_view_private_key: *fee_account.view_private_key(),
+        };
         let input_credentials = get_input_credentials(
             BlockVersion::MAX,
             Amount::new(1000, token2),
@@ -77,9 +83,25 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
+        sci_builder
+            .add_partial_fill_output(
+                Amount::new(
+                    calc_fee_amount(1000 * MILLIMOB_TO_PICOMOB, fee_config.fee_basis_points),
+                    Mob::ID,
+                ),
+                &fee_config.fee_address,
+                &mut rng,
+            )
+            .unwrap();
 
         let sci = sci_builder.build(&NoKeysRingSigner {}, &mut rng).unwrap();
-        let quote = Quote::new(sci, None).unwrap();
+        let quote = Quote::new(
+            sci,
+            None,
+            &fee_config.fee_view_private_key,
+            fee_config.fee_basis_points,
+        )
+        .unwrap();
 
         let amount = Amount {
             value: 1u64 << 13,

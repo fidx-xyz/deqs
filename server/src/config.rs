@@ -5,13 +5,17 @@
 use clap::Parser;
 use deqs_api::DeqsClientUri;
 use deqs_p2p::libp2p::Multiaddr;
+use mc_account_keys::PublicAddress;
+use mc_api::printable::PrintableWrapper;
+use mc_crypto_keys::RistrettoPrivate;
 use mc_transaction_types::TokenId;
 use mc_util_uri::AdminUri;
-use serde::Serialize;
 use std::{error::Error, path::PathBuf};
 
 /// Command-line configuration options for the DEQS server
-#[derive(Parser, Serialize)]
+// Do not derive Serialize, this has a sensitive private key. If you add fields here you might
+// want to add them to the block inside main() that creates `config_json`.
+#[derive(Parser)]
 #[clap(version)]
 pub struct ServerConfig {
     /// Path to sqlite database
@@ -56,6 +60,18 @@ pub struct ServerConfig {
     /// TokenId 0 and a minimum amount of 200 for TokenId 1
     #[clap(long = "quote-minimum-map", use_value_delimiter = true, value_parser = parse_key_val::<TokenId, u64>)]
     pub quote_minimum_map: Vec<(TokenId, u64)>,
+
+    /// Fee public address in B58 format
+    #[clap(long, value_parser = parse_public_address, env = "MC_FEE_B58_ADDRESS")]
+    pub fee_b58_address: PublicAddress,
+
+    /// Fee basis points
+    #[clap(long, env = "MC_FEE_BASIS_POINTS")]
+    pub fee_basis_points: u16,
+
+    /// Fee private view key (hex-encoded)
+    #[clap(long, value_parser = parse_ristretto_private, env = "MC_FEE_PRIVATE_VIEW_KEY")]
+    pub fee_private_view_key: RistrettoPrivate,
 }
 
 /// Parse a single key-value pair
@@ -70,4 +86,24 @@ where
         .find('=')
         .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
     Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
+}
+
+fn parse_public_address(b58: &str) -> Result<PublicAddress, String> {
+    let printable_wrapper = PrintableWrapper::b58_decode(b58.into())
+        .map_err(|err| format!("failed parsing b58 address '{b58}': {err}"))?;
+
+    if printable_wrapper.has_public_address() {
+        let public_address = PublicAddress::try_from(printable_wrapper.get_public_address())
+            .map_err(|err| format!("failed converting b58 public address '{b58}': {err}"))?;
+
+        Ok(public_address)
+    } else {
+        Err(format!("b58 address '{b58}' is not a public address"))
+    }
+}
+
+fn parse_ristretto_private(src: &str) -> Result<RistrettoPrivate, String> {
+    let bytes: [u8; 32] =
+        mc_util_parse::parse_hex(src).map_err(|_e| "Failed parsing private key".to_string())?;
+    RistrettoPrivate::try_from(&bytes).map_err(|_e| "Failed parsing private key".into())
 }

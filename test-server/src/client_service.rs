@@ -4,10 +4,11 @@ use std::sync::{Arc, Mutex};
 
 use deqs_api::{
     deqs::{
-        GetQuotesRequest, GetQuotesResponse, LiveUpdate, LiveUpdatesRequest, SubmitQuotesRequest,
-        SubmitQuotesResponse,
+        GetConfigResponse, GetQuotesRequest, GetQuotesResponse, LiveUpdate, LiveUpdatesRequest,
+        SubmitQuotesRequest, SubmitQuotesResponse,
     },
     deqs_grpc::{create_deqs_client_api, DeqsClientApi},
+    Empty,
 };
 use grpcio::{RpcContext, RpcStatus, RpcStatusCode, ServerStreamingSink, Service, UnarySink};
 use mc_common::logger::Logger;
@@ -28,6 +29,9 @@ pub struct ClientService {
     /// Hardcoded response we will return for GetQuotes requests.
     pub get_quotes_response: Arc<Mutex<Result<GetQuotesResponse, RpcStatus>>>,
 
+    /// Config response
+    pub get_config_response: Arc<Mutex<Result<GetConfigResponse, RpcStatus>>>,
+
     /// Logger.
     logger: Logger,
 }
@@ -42,6 +46,9 @@ impl ClientService {
             )))),
             get_quotes_requests: Arc::new(Mutex::new(Vec::new())),
             get_quotes_response: Arc::new(Mutex::new(Err(RpcStatus::new(
+                RpcStatusCode::UNAVAILABLE,
+            )))),
+            get_config_response: Arc::new(Mutex::new(Err(RpcStatus::new(
                 RpcStatusCode::UNAVAILABLE,
             )))),
             logger,
@@ -94,5 +101,14 @@ impl DeqsClientApi for ClientService {
         _responses: ServerStreamingSink<LiveUpdate>,
     ) {
         unimplemented!()
+    }
+
+    fn get_config(&mut self, ctx: RpcContext, _req: Empty, sink: UnarySink<GetConfigResponse>) {
+        send_result(
+            ctx,
+            sink,
+            self.get_config_response.lock().unwrap().clone(),
+            &self.logger,
+        )
     }
 }

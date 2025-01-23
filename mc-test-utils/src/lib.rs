@@ -2,7 +2,7 @@
 
 //! Test utilities for generating some MobileCoin objects
 
-use mc_account_keys::AccountKey;
+use mc_account_keys::{AccountKey, PublicAddress};
 use mc_crypto_ring_signature_signer::NoKeysRingSigner;
 use mc_fog_report_validation_test_utils::MockFogResolver;
 use mc_ledger_db::{test_utils::add_txos_to_ledger, Ledger, LedgerDB};
@@ -77,17 +77,20 @@ pub fn create_sci_builder(
 }
 
 /// Create an SCI that offers some amount of a given token in exchange for a
-/// different amount of another token. Returning the builder allows the caller
-/// to customize the SCI further.
+/// different amount of another token. It also adds a required output for the
+/// other token that goes to the fee address.
+/// Returning the builder allows the caller to customize the SCI further.
 pub fn create_sci(
     base_token_id: TokenId,
     counter_token_id: TokenId,
     base_amount: u64,
     counter_amount: u64,
+    fee_address: &PublicAddress,
+    fee_amount: u64,
     rng: &mut (impl RngCore + CryptoRng),
     ledger_db: Option<&LedgerDB>,
 ) -> SignedContingentInput {
-    let builder = create_sci_builder(
+    let mut builder = create_sci_builder(
         base_token_id,
         counter_token_id,
         base_amount,
@@ -95,6 +98,10 @@ pub fn create_sci(
         rng,
         ledger_db,
     );
+
+    builder
+        .add_required_output(Amount::new(fee_amount, counter_token_id), fee_address, rng)
+        .unwrap();
 
     let sci = builder.build(&NoKeysRingSigner {}, rng).unwrap();
 
@@ -106,8 +113,9 @@ pub fn create_sci(
 
 /// Create a partial fill SCI that offers between required_base_change_amount
 /// and base_amount_offered tokens, with a minimum required fill of
-/// min_base_fill_amount.
-pub fn create_partial_sci(
+/// min_base_fill_amount. Returning the builder allows the
+/// caller to customize the SCI further.
+pub fn create_partial_sci_builder(
     base_token_id: TokenId,
     counter_token_id: TokenId,
     base_amount_offered: u64,
@@ -116,7 +124,7 @@ pub fn create_partial_sci(
     counter_amount: u64,
     rng: &mut (impl RngCore + CryptoRng),
     ledger_db: Option<&LedgerDB>,
-) -> SignedContingentInput {
+) -> SignedContingentInputBuilder<MockFogResolver> {
     let block_version = BlockVersion::MAX;
     let fog_resolver = MockFogResolver::default();
 
@@ -183,6 +191,39 @@ pub fn create_partial_sci(
         .unwrap();
 
     builder.set_min_partial_fill_value(min_base_fill_amount);
+
+    builder
+}
+
+/// Create a partial fill SCI that offers between required_base_change_amount
+/// and base_amount_offered tokens, with a minimum required fill of
+/// min_base_fill_amount. It also adds a partial fill output for paying fees.
+pub fn create_partial_sci(
+    base_token_id: TokenId,
+    counter_token_id: TokenId,
+    base_amount_offered: u64,
+    min_base_fill_amount: u64,
+    required_base_change_amount: u64,
+    counter_amount: u64,
+    fee_address: &PublicAddress,
+    fee_amount: u64,
+    rng: &mut (impl RngCore + CryptoRng),
+    ledger_db: Option<&LedgerDB>,
+) -> SignedContingentInput {
+    let mut builder = create_partial_sci_builder(
+        base_token_id,
+        counter_token_id,
+        base_amount_offered,
+        min_base_fill_amount,
+        required_base_change_amount,
+        counter_amount,
+        rng,
+        ledger_db,
+    );
+
+    builder
+        .add_partial_fill_output(Amount::new(fee_amount, counter_token_id), fee_address, rng)
+        .unwrap();
 
     let sci = builder.build(&NoKeysRingSigner {}, rng).unwrap();
     sci.validate().unwrap();
