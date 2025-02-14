@@ -23,9 +23,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = ServerConfig::parse();
 
     if *config.fee_b58_address.view_public_key()
-        != RistrettoPublic::from(&config.fee_private_view_key)
+        == RistrettoPublic::from(&config.fee_private_view_key)
     {
-        panic!("The fee private view key does not match the public view key in the fee B58 address")
+        panic!("The fee private view key should not be the root of the public view key in the fee b58 address -- that would be the subaddress view private key. What is actually needed is the fee account private view key.")
     }
 
     let (logger, _global_logger_guard) = mc_common::logger::create_app_logger(o!());
