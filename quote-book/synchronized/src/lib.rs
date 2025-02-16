@@ -1,4 +1,5 @@
 // Copyright (c) 2023 MobileCoin Inc.
+#![feature(assert_matches)]
 
 use deqs_quote_book_api::{Error, Pair, Quote, QuoteBook, QuoteId};
 use mc_account_keys::PublicAddress;
@@ -136,17 +137,20 @@ where
             if input_rules.max_tombstone_block != 0
                 && current_block_index >= input_rules.max_tombstone_block
             {
-                return Err(Error::QuoteIsStale);
+                return Err(Error::QuoteAlreadyTombstoned(
+                    current_block_index,
+                    input_rules.max_tombstone_block,
+                ));
             }
         }
         // Check the ledger to see if the quote is stale before adding it to the
         // quotebook.
-        if self
+        if let Some(block_index) = self
             .ledger
-            .contains_key_image(&quote.sci().key_image())
+            .check_key_image(&quote.sci().key_image())
             .map_err(|err| Error::ImplementationSpecific(err.to_string()))?
         {
-            return Err(Error::QuoteIsStale);
+            return Err(Error::QuoteKeyImageAlreadyAppeared(block_index));
         }
         self.validate_quote_ring_members(quote)?;
 
@@ -355,7 +359,7 @@ mod tests {
     use mc_transaction_builder::test_utils::get_transaction;
     use mc_transaction_core::{Amount, TokenId};
     use rand::{rngs::StdRng, SeedableRng};
-    use std::{sync::Mutex, vec};
+    use std::{assert_matches::assert_matches, sync::Mutex, vec};
     struct TestContext {
         ledger: LedgerDB,
         removed_quotes_sent_to_live_updates: Arc<Mutex<Vec<Quote>>>,
@@ -502,9 +506,9 @@ mod tests {
         .unwrap();
 
         // Because the key image is already in the ledger, adding this sci should fail
-        assert_eq!(
+        assert_matches!(
             synchronized_quote_book.add_sci(sci, None).unwrap_err(),
-            Error::QuoteIsStale
+            Error::QuoteKeyImageAlreadyAppeared(_)
         );
 
         // Adding a quote that isn't already in the ledger should work
@@ -616,9 +620,9 @@ mod tests {
 
         let sci = sci_builder.build(&NoKeysRingSigner {}, &mut rng).unwrap();
 
-        assert_eq!(
+        assert_matches!(
             synchronized_quote_book.add_sci(sci, None).unwrap_err(),
-            Error::QuoteIsStale
+            Error::QuoteAlreadyTombstoned(..),
         );
 
         // Because the tombstone block is 0, adding this sci should pass
@@ -678,9 +682,9 @@ mod tests {
 
         let sci4 = sci_builder4.build(&NoKeysRingSigner {}, &mut rng).unwrap();
 
-        assert_eq!(
+        assert_matches!(
             synchronized_quote_book.add_sci(sci4, None).unwrap_err(),
-            Error::QuoteIsStale
+            Error::QuoteAlreadyTombstoned(..),
         );
     }
 

@@ -21,8 +21,11 @@ pub enum Error {
     /// Quote not found
     QuoteNotFound,
 
+    /// Quote already tombstoned: {0} >= max_tombstone_block ({1})
+    QuoteAlreadyTombstoned(u64, u64),
+
     /// Quote has a spent keyimage
-    QuoteIsStale,
+    QuoteKeyImageAlreadyAppeared(u64),
 
     /// Quote cannot fulfill the desired amount ({0}) of base tokens
     InsufficientBaseTokens(u64),

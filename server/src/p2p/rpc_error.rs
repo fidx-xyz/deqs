@@ -55,7 +55,8 @@ impl From<QuoteBookError> for RpcQuoteBookError {
             QuoteBookError::UnsupportedSci(err) => Self::UnsupportedSci(err),
             QuoteBookError::QuoteAlreadyExists { .. } => Self::QuoteAlreadyExists,
             QuoteBookError::QuoteNotFound => Self::QuoteNotFound,
-            QuoteBookError::QuoteIsStale => Self::QuoteIsStale,
+            QuoteBookError::QuoteAlreadyTombstoned(..) => Self::QuoteIsStale,
+            QuoteBookError::QuoteKeyImageAlreadyAppeared(_) => Self::QuoteIsStale,
             err => Self::Other(err.to_string()),
         }
     }

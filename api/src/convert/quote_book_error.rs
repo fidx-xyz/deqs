@@ -9,7 +9,8 @@ impl From<&Error> for api::QuoteStatusCode {
             Error::Sci(_) => Self::INVALID_SCI,
             Error::UnsupportedSci(_) => Self::UNSUPPORTED_SCI,
             Error::QuoteAlreadyExists { .. } => Self::QUOTE_ALREADY_EXISTS,
-            Error::QuoteIsStale => Self::QUOTE_IS_STALE,
+            Error::QuoteAlreadyTombstoned(..) => Self::QUOTE_IS_STALE,
+            Error::QuoteKeyImageAlreadyAppeared(..) => Self::QUOTE_IS_STALE,
             Error::InvalidRing(_) => Self::INVALID_SCI,
             _ => Self::OTHER,
         }
